@@ -27,8 +27,9 @@ fn run() -> Result<ExitCode, Box<dyn std::error::Error>> {
 
     if args == [OsString::from("privacy")] {
         println!(
-            "fastjj {} (jj 0.29.0)\nProcess privacy: enforced by Linux seccomp\nChild processes and exec: denied\nWorker threads: allowed\nGit transport: in-process libgit2\nPrivate request mode: fastjj --request-stdin",
-            env!("CARGO_PKG_VERSION")
+            "fastjj {} (jj 0.29.0)\nProcess privacy: enforced by {}\nChild processes and exec: denied\nWorker threads: allowed\nGit transport: in-process libgit2\nPrivate request mode: fastjj --request-stdin",
+            env!("CARGO_PKG_VERSION"),
+            privacy::enforcement_name()
         );
         return Ok(ExitCode::SUCCESS);
     }

@@ -132,9 +132,17 @@ fn private_stdin_init_and_status_keep_argv_clean() {
         .stderr(Stdio::piped())
         .spawn()
         .unwrap();
-    let argv = fs::read(format!("/proc/{}/cmdline", child.id())).unwrap();
-    assert!(!String::from_utf8_lossy(&argv).contains("secret-customer"));
-    assert!(!String::from_utf8_lossy(&argv).contains(repo.to_str().unwrap()));
+    // Observe the running process from the test harness (not from fastjj).
+    // Wide ps output is available on both macOS and Linux and never shows env.
+    let observed = Command::new("ps")
+        .args(["-ww", "-p", &child.id().to_string(), "-o", "args="])
+        .output()
+        .unwrap();
+    assert!(observed.status.success());
+    let argv = String::from_utf8_lossy(&observed.stdout);
+    assert!(argv.contains("--request-stdin"));
+    assert!(!argv.contains("secret-customer"));
+    assert!(!argv.contains(repo.to_str().unwrap()));
     let request = serde_json::to_vec(&json!({"cwd":repo,"args":["status"]})).unwrap();
     child.stdin.take().unwrap().write_all(&request).unwrap();
     assert!(success(child.wait_with_output().unwrap()).contains("secret-path.txt"));
@@ -237,7 +245,11 @@ fn external_commands_and_editors_fail_without_side_effects() {
         ],
     );
     assert!(!output.status.success());
-    assert!(text(&output).contains("Operation not permitted"));
+    let error = text(&output);
+    assert!(
+        error.contains("Operation not permitted") || error.contains("Permission denied"),
+        "{error}"
+    );
     assert!(!marker.exists());
 }
 

@@ -11,10 +11,15 @@ jobs:
   check:
     strategy:
       matrix:
-        runner: [ubuntu-latest, ubuntu-24.04-arm]
+        runner: [ubuntu-24.04, ubuntu-24.04-arm, macos-15-intel, macos-15]
+      # Complete every platform check even if one runner finds a regression.
+      fail-fast: false
     runs-on: ${{ matrix.runner }}
     steps:
       - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
       - uses: dtolnay/rust-toolchain@stable
         with:
           toolchain: 1.97.1
@@ -23,5 +28,8 @@ jobs:
       - run: cargo fmt --all --check
       - run: cargo clippy --locked --all-targets --no-deps -- -D warnings
       - run: cargo test --locked
-      - run: sudo apt-get update && sudo apt-get install -y strace
-      - run: python3 scripts/verify_process_privacy.py target/debug/fastjj
+      - run: python3 -m unittest discover -s tests -p 'test_*.py'
+      - if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y strace
+      - if: runner.os == 'Linux'
+        run: python3 scripts/verify_process_privacy.py target/debug/fastjj
