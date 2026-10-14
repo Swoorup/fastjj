@@ -312,6 +312,11 @@ fn parse_file(
             .find(|c: char| c.is_whitespace() || c == '=')
             .unwrap_or(line.len());
         let key = line[..split].to_ascii_lowercase();
+        let key = if key == "pubkeyacceptedkeytypes" {
+            "pubkeyacceptedalgorithms".into()
+        } else {
+            key
+        };
         let args = shlex::split(
             line[split..]
                 .trim_start()

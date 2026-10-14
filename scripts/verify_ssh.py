@@ -252,7 +252,7 @@ Host *
                      ("encrypted-rsa", False, None), ("encrypted-ecdsa", False, None),
                      ("agent", True, None), ("disk", False, "jump-one,jump-two")]
             for index, (name, use_agent, jumps) in enumerate(cases):
-                write_config(keys[name], use_agent, jumps)
+                write_config(keys[name], use_agent, jumps, extra="PubkeyAcceptedAlgorithms ^rsa-sha2-512" if name == "rsa" else "")
                 password = passphrase if name.startswith("encrypted") else None
 
                 def jj(cwd, args, interactive=False, expected_error=None):
@@ -289,6 +289,10 @@ Host *
                 print(f"SSH clone/fetch/push verified: {name}{' with native two-hop ProxyJump' if jumps else ''}", flush=True)
 
             # IdentityAgent is selected explicitly; no SSH_AUTH_SOCK is supplied.
+            write_config(keys["disk"], extra="PreferredAuthentications password\n BatchMode yes")
+            private_command(binary, environment, clone, ["git", "fetch"], root, expected_error="SSH authentication failed")
+            write_config(keys["disk"], extra="PubkeyAuthentication no\n BatchMode yes")
+            private_command(binary, environment, clone, ["git", "fetch"], root, expected_error="SSH authentication failed")
             write_config(keys["wrong"], True, extra="BatchMode yes")
             private_command(binary, environment, clone, ["git", "fetch"], root, expected_error="SSH authentication failed")
             write_config(keys["disk"], extra="BatchMode yes")
