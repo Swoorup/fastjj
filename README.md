@@ -143,8 +143,11 @@ SSH supports host aliases and patterns, `HostName`, `User`, `Port`, ordered
 `Include`, and native `Match host`, `originalhost`, `user`, and `localuser`.
 Paths support quoting, `~/`, and `%d`, `%h`, `%n`, `%r`, `%p`, and `%%` tokens.
 Algorithm lists (including `+`, `-`, and `^` modifiers) for `KexAlgorithms`,
-`HostKeyAlgorithms`, `Ciphers`, and
-`MACs`, compression, `ConnectTimeout`, and `PubkeyAuthentication` are supported.
+`HostKeyAlgorithms`, `PubkeyAcceptedAlgorithms`, `Ciphers`, and `MACs`,
+compression, and `ConnectTimeout` are supported. `PreferredAuthentications`,
+`PubkeyAuthentication`, `PasswordAuthentication`, and
+`KbdInteractiveAuthentication` control native key, password, and terminal
+keyboard-interactive authentication.
 `FASTJJ_SSH_CONFIG` can select a separate SSH configuration file; this replaces
 the two default files. Its value is an environment variable, outside argv privacy.
 

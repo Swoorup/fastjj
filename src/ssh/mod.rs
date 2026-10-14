@@ -22,11 +22,26 @@ type Error = Box<dyn std::error::Error + Send + Sync>;
 type Result<T> = std::result::Result<T, Error>;
 type PasswordCache = Arc<Mutex<HashMap<PathBuf, Zeroizing<String>>>>;
 
+/// Clear cached credentials when this CLI invocation ends. libgit2 keeps its
+/// registered factory alive globally, so relying on that factory's Drop would
+/// retain cached values until process termination.
+pub struct InvocationGuard {
+    passwords: PasswordCache,
+}
+impl Drop for InvocationGuard {
+    fn drop(&mut self) {
+        self.passwords
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clear();
+    }
+}
+
 /// Register before creating transports or starting worker threads.
 ///
 /// # Safety
 /// No other thread may create or register a libgit2 transport during this call.
-pub unsafe fn install() -> std::result::Result<(), git2::Error> {
+pub unsafe fn install() -> std::result::Result<InvocationGuard, git2::Error> {
     let passwords = PasswordCache::default();
     for scheme in ["ssh", "git+ssh", "ssh+git"] {
         let passwords = passwords.clone();
@@ -43,7 +58,7 @@ pub unsafe fn install() -> std::result::Result<(), git2::Error> {
             })?;
         }
     }
-    Ok(())
+    Ok(InvocationGuard { passwords })
 }
 
 struct NativeSsh {
@@ -111,6 +126,7 @@ impl NativeSsh {
             for (key, methods) in [
                 ("kexalgorithms", vec![ssh2::MethodType::Kex]),
                 ("hostkeyalgorithms", vec![ssh2::MethodType::HostKey]),
+                ("pubkeyacceptedalgorithms", vec![ssh2::MethodType::SignAlgo]),
                 (
                     "ciphers",
                     vec![ssh2::MethodType::CryptCs, ssh2::MethodType::CryptSc],
@@ -188,7 +204,13 @@ fn algorithm_preferences(
     method: ssh2::MethodType,
     value: &str,
 ) -> Result<String> {
-    let supported = session.supported_algs(method)?;
+    // libssh2 accepts signing preferences but doesn't expose a built-in
+    // SignAlgo list; its host-key algorithms describe the same crypto backend.
+    let supported = session.supported_algs(if matches!(method, ssh2::MethodType::SignAlgo) {
+        ssh2::MethodType::HostKey
+    } else {
+        method
+    })?;
     let preferences = if let Some(add) = value.strip_prefix('+') {
         supported
             .iter()
@@ -381,6 +403,91 @@ fn public_key(path: &Path) -> Option<Vec<u8>> {
 }
 
 fn authenticate(session: &Session, options: &Options, passwords: &PasswordCache) -> Result<()> {
+    let preferred = options
+        .values
+        .get("preferredauthentications")
+        .map(|v| v[0].as_str())
+        .unwrap_or("publickey,keyboard-interactive,password");
+    let enabled = |key: &str| {
+        options
+            .values
+            .get(key)
+            .is_none_or(|v| !v[0].eq_ignore_ascii_case("no"))
+    };
+    for method in preferred.split(',') {
+        // Re-query after partial success, which can change the methods offered
+        // by a server requiring more than one authentication factor.
+        let offered = session.auth_methods(&options.user)?.to_owned();
+        if !offered.split(',').any(|offered| offered == method) {
+            continue;
+        }
+        match method {
+            "publickey" if authenticate_keys(session, options, passwords)? => return Ok(()),
+            "password" if !options.batch && enabled("passwordauthentication") => {
+                let password = Zeroizing::new(
+                    rpassword::prompt_password(format!(
+                        "SSH password for {}@{}: ",
+                        options.user, options.host
+                    ))
+                    .map_err(|_| "SSH password authentication requires an interactive terminal")?,
+                );
+                if session.userauth_password(&options.user, &password).is_ok() {
+                    return Ok(());
+                }
+            }
+            "keyboard-interactive"
+                if !options.batch
+                    && enabled("kbdinteractiveauthentication")
+                    && enabled("challengeresponseauthentication") =>
+            {
+                let mut prompts = NativePrompts { error: false };
+                if session
+                    .userauth_keyboard_interactive(&options.user, &mut prompts)
+                    .is_ok()
+                {
+                    return Ok(());
+                }
+                if prompts.error {
+                    return Err(
+                        "SSH keyboard-interactive authentication requires an interactive terminal"
+                            .into(),
+                    );
+                }
+            }
+            _ => {}
+        }
+    }
+    Err("SSH authentication failed; configure IdentityFile or an existing IdentityAgent (encrypted files need a terminal or an unlocked agent)".into())
+}
+
+struct NativePrompts {
+    error: bool,
+}
+impl ssh2::KeyboardInteractivePrompt for NativePrompts {
+    fn prompt<'a>(
+        &mut self,
+        _username: &str,
+        _instructions: &str,
+        prompts: &[ssh2::Prompt<'a>],
+    ) -> Vec<String> {
+        prompts
+            .iter()
+            .map(|prompt| {
+                // Use the controlling terminal and suppress echo for every response.
+                rpassword::prompt_password(prompt.text.as_ref()).unwrap_or_else(|_| {
+                    self.error = true;
+                    String::new()
+                })
+            })
+            .collect()
+    }
+}
+
+fn authenticate_keys(
+    session: &Session,
+    options: &Options,
+    passwords: &PasswordCache,
+) -> Result<bool> {
     if options
         .values
         .get("pubkeyauthentication")
@@ -401,7 +508,7 @@ fn authenticate(session: &Session, options: &Options, passwords: &PasswordCache)
                         continue;
                     }
                     if agent.userauth(&options.user, &identity).is_ok() {
-                        return Ok(());
+                        return Ok(true);
                     }
                 }
             }
@@ -411,7 +518,7 @@ fn authenticate(session: &Session, options: &Options, passwords: &PasswordCache)
                 .userauth_pubkey_file(&options.user, None, path, None)
                 .is_ok()
             {
-                return Ok(());
+                return Ok(true);
             }
             if let Some(password) = passwords
                 .lock()
@@ -421,7 +528,7 @@ fn authenticate(session: &Session, options: &Options, passwords: &PasswordCache)
                     .userauth_pubkey_file(&options.user, None, path, Some(password))
                     .is_ok()
             {
-                return Ok(());
+                return Ok(true);
             }
             let contents = Zeroizing::new(fs::read_to_string(path)?);
             let encrypted = ssh_key::PrivateKey::from_openssh(&*contents)
@@ -437,7 +544,7 @@ fn authenticate(session: &Session, options: &Options, passwords: &PasswordCache)
                     .userauth_pubkey_file(&options.user, None, path, Some(&password))
                     .is_ok()
             {
-                return Ok(());
+                return Ok(true);
             }
             #[cfg(not(target_os = "macos"))]
             let _ = options.use_keychain;
@@ -457,27 +564,12 @@ fn authenticate(session: &Session, options: &Options, passwords: &PasswordCache)
                         .lock()
                         .map_err(|_| "SSH password cache unavailable")?
                         .insert(path.clone(), password);
-                    return Ok(());
+                    return Ok(true);
                 }
             }
         }
     }
-    if !options.batch
-        && session
-            .auth_methods(&options.user)?
-            .split(',')
-            .any(|method| method == "password")
-    {
-        let password = Zeroizing::new(rpassword::prompt_password(format!(
-            "SSH password for {}@{}: ",
-            options.user, options.host
-        ))?);
-        session.userauth_password(&options.user, &password)?;
-        if session.authenticated() {
-            return Ok(());
-        }
-    }
-    Err("SSH authentication failed; configure IdentityFile or an existing IdentityAgent (encrypted files need a terminal or an unlocked agent)".into())
+    Ok(false)
 }
 
 #[cfg(target_os = "macos")]
