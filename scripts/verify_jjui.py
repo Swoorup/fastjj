@@ -9,6 +9,7 @@ from pathlib import Path
 import pty
 import re
 import shutil
+import signal
 import struct
 import subprocess
 import sys
@@ -81,7 +82,8 @@ class UI:
             try:
                 self.child.wait(timeout=5)
             except subprocess.TimeoutExpired:
-                self.child.terminate()
+                # The fixture owns this session, including any tracer and backend.
+                os.killpg(self.child.pid, signal.SIGKILL)
                 self.child.wait(timeout=5)
                 raise AssertionError("UI failed to exit cleanly")
         self.read()
@@ -184,8 +186,10 @@ def main():
             ui.wait(lambda text: "visions " in text[redo_start:], "redo dialog closed")
             ui.send("D")
             ui.wait(lambda text: ".save" in text, "native terminal editor")
+            editor_start = len(ui.text())
             ui.send("EDITOR_CANARY\n.save\n")
             ui.wait(lambda text: "EDITOR_CANARY" in jj(binary,env,repo,["log","--no-graph","-r","all()","-T","description"]), "interactive description")
+            ui.wait(lambda text: "visions " in text[editor_start:], "terminal restored to UI")
             ui.send("$")
             ui.send("touch SHOULD_NOT_EXIST\r")
             ui.wait(lambda text: "external shell commands are disabled" in text, "shell privacy rejection")
