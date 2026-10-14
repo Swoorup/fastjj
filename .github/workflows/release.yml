@@ -14,6 +14,7 @@ concurrency:
 
 jobs:
   build:
+    timeout-minutes: 45
     strategy:
       fail-fast: false
       matrix:
@@ -51,7 +52,7 @@ jobs:
           host=$(rustc -vV | sed -n 's/^host: //p')
           test "$host" = "$TARGET"
       - name: Test optimized binary and kernel privacy
-        run: cargo test --release --locked --target "$TARGET"
+        run: cargo test --release --locked --target "$TARGET" -- --nocapture
       - name: Verify native HTTPS transport and certificate trust
         run: python3 scripts/verify_https_clone.py "target/$TARGET/release/fastjj"
       - if: runner.os == 'Linux'

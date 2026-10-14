@@ -1,6 +1,6 @@
 use std::fs::{self, File};
 use std::io::{self, Read, Write};
-use std::os::fd::FromRawFd;
+use std::os::fd::{AsRawFd, FromRawFd};
 use std::os::unix::process::CommandExt;
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
@@ -11,6 +11,7 @@ fn built_in_editor_updates_description_without_an_external_editor() {
     let config = root.path().join("config.toml");
     fs::write(&config, "[user]\nname='Test'\nemail='test@example.invalid'\n[ui]\npaginate='never'\ncolor='never'\n").unwrap();
     let binary = env!("CARGO_BIN_EXE_fastjj");
+    eprintln!("terminal fixture: initialize repository");
     let output = Command::new(binary)
         .current_dir(root.path())
         .env("JJ_CONFIG", &config)
@@ -63,6 +64,7 @@ fn built_in_editor_updates_description_without_an_external_editor() {
         });
     }
     let mut child = command.spawn().unwrap();
+    eprintln!("terminal fixture: editor started");
     drop(command);
     drop(slave);
     master
@@ -82,16 +84,28 @@ fn built_in_editor_updates_description_without_an_external_editor() {
         std::thread::sleep(Duration::from_millis(10));
     }
     let mut terminal_output = Vec::new();
+    eprintln!("terminal fixture: editor exited; drain terminal output");
+    // A macOS PTY master can remain readable without reporting EOF after its
+    // slave closes. The child has exited; drain available bytes, never wait
+    // indefinitely for the device to emit EOF.
+    let flags = unsafe { libc::fcntl(master.as_raw_fd(), libc::F_GETFL) };
+    assert_ne!(flags, -1);
+    assert_eq!(
+        unsafe { libc::fcntl(master.as_raw_fd(), libc::F_SETFL, flags | libc::O_NONBLOCK) },
+        0
+    );
     let mut buffer = [0; 4096];
     loop {
         match master.read(&mut buffer) {
             Ok(0) => break,
             Ok(n) => terminal_output.extend_from_slice(&buffer[..n]),
             Err(e) if e.raw_os_error() == Some(libc::EIO) => break,
+            Err(e) if e.kind() == io::ErrorKind::WouldBlock => break,
             Err(e) => panic!("reading terminal failed: {e}"),
         }
     }
     assert!(String::from_utf8_lossy(&terminal_output).contains("Enter replacement text"));
+    eprintln!("terminal fixture: verify persisted description");
     let output = Command::new(binary)
         .current_dir(root.path().join("repo"))
         .env("JJ_CONFIG", &config)

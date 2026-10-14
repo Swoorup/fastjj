@@ -9,6 +9,7 @@ permissions:
 
 jobs:
   check:
+    timeout-minutes: 30
     strategy:
       matrix:
         runner: [ubuntu-24.04, ubuntu-24.04-arm, macos-15-intel, macos-15]
@@ -29,7 +30,7 @@ jobs:
           cache-on-failure: true
       - run: cargo fmt --all --check
       - run: cargo clippy --locked --all-targets --no-deps -- -D warnings
-      - run: cargo test --locked
+      - run: cargo test --locked -- --nocapture
       - name: Verify native HTTPS transport and certificate trust
         run: python3 scripts/verify_https_clone.py target/debug/fastjj
       - run: python3 -m unittest discover -s tests -p 'test_*.py'
