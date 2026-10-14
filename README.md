@@ -114,7 +114,9 @@ builds and tests optimized binaries on native runners for:
 | macOS | Intel | `x86_64-apple-darwin` |
 | macOS | Apple Silicon | `aarch64-apple-darwin` |
 
-Every push to `main` and manual workflow run uploads downloadable build artifacts.
+Pushes to `main` and manual workflow runs upload downloadable build artifacts.
+Changes confined to Nix packaging and the CI workflow skip rebuilding unchanged
+release binaries; source and installed-package CI checks still run.
 Version tags such as `v0.2.1` additionally publish all four archives to
 [GitHub Releases](https://github.com/Swoorup/fastjj/releases), after every target
 passes its optimized tests. The tag must match the version in `Cargo.toml`.
