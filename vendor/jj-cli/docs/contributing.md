@@ -1,6 +1,5 @@
 # How to Contribute
 
-
 ## Policies
 
 We'd love to accept your patches and contributions to this project. There are
@@ -53,6 +52,15 @@ use GitHub pull requests for this purpose. Consult
 [GitHub Help](https://help.github.com/articles/about-pull-requests/) for more
 information on using pull requests.
 
+The project unfortunately has a shortage of reviewers (a common problem in
+open-source projects). To maximize the chances of getting a timely review, do
+what you can to provide reviewers (and other future readers) with the necessary
+context. For example, if you're adding a new feature, explain why that feature
+is useful, how it works from the user's point of view, how it's designed, and
+what the limitations of your design are. If you have considered other designs,
+it may be useful to mention them. Another way of speeding up reviews is to
+review others' PRs so the maintainers don't need to spend as much time on them.
+
 When you address comments on a PR, don't make the changes in a commit on top (as
 is typical on GitHub). Instead, please make the changes in the appropriate
 commit. You can do that by creating a new commit on top of the initial commit
@@ -92,7 +100,7 @@ stakeholders, which we do with [Design Docs](design_docs.md), see the
 We appreciate [bug
 reports](https://github.com/jj-vcs/jj/issues/new?template=bug_report.md)
 about any problems, however small, lurking in [our documentation
-website](https://jj-vcs.github.io/jj/prerelease) or in the `jj help
+website](https://docs.jj-vcs.dev/prerelease) or in the `jj help
 <command>` docs. If a part of the bug report template does not apply, you can
 just delete it.
 
@@ -141,7 +149,7 @@ recommended steps.
 One-time setup:
 
     rustup toolchain add nightly  # wanted for 'rustfmt'
-    rustup toolchain add 1.84     # also specified in Cargo.toml
+    rustup toolchain add 1.89     # also specified in Cargo.toml
     cargo install --locked bacon
     cargo install --locked cargo-insta
     cargo install --locked cargo-nextest
@@ -179,7 +187,7 @@ These are listed roughly in order of decreasing importance.
 3. Your code will be rejected if it cannot be compiled with the minimal
    supported version of Rust ("MSRV"). Currently, `jj` follows a rather
    casual MSRV policy: "The current `rustc` stable version, minus one."
-   As of this writing, that version is **1.84.0**.
+   As of this writing, that version is **1.89.0**.
 
 4. Your code needs to pass `cargo clippy`. You can also
    use `cargo +nightly clippy` if you wish to see more warnings.
@@ -194,7 +202,6 @@ These are listed roughly in order of decreasing importance.
    On Linux, you may be able to speed up `nextest` even further by using
    the `mold` linker, as explained below.
 
-
 ### Configuring `jj fix` to run `rustfmt`
 
 Run this in the jj repo:
@@ -202,6 +209,14 @@ Run this in the jj repo:
 ```shell
 jj config set --repo fix.tools.rustfmt '{ command = ["rustfmt", "+nightly"], patterns = ["glob:**/*.rs"] }'
 ```
+
+> Note: users of Nix and `direnv` should drop the `"+nightly"` argument above
+> since the devShell is already configured to pull in a nightly version of
+> rustfmt:
+>
+> ```shell
+> jj config set --repo fix.tools.rustfmt '{ command = ["rustfmt"], patterns = ["glob:**/*.rs"] }'
+> ```
 
 ### Using `mold` for faster tests on Linux
 
@@ -231,6 +246,55 @@ to use" instructions](https://github.com/rui314/mold#how-to-use).
 
 On recent versions of MacOS, the default linker Rust uses is already
 multi-threaded. It should use all the CPU cores without any configuration.
+
+### Set up a RAM disk for faster tests on macOS
+
+`jj` tests can be sped up significantly on macOS by using a RAM disk instead of
+the usual `/tmp` directory (on one Mac, the tests sped up ~3 times from 180
+seconds to 55 seconds). You can set this up as follows:
+
+```sh
+sudo mkdir -p /Volumes/RAMDisk
+sudo chmod a+wx /Volumes/RAMDisk
+sudo mount_tmpfs /Volumes/RAMDisk  # Add `-e` to make it case-sensitive
+                      # Add `-o nobrowse` to hide the tmpfs from Finder
+```
+
+You will need to re-run this after a reboot. Consider making it a script you can
+run with `sudo`. (The first two commands don't need sudo if you change the dir
+to somewhere in your HOME, the last one always does.)
+
+Then, you can rust tests as, for example,
+
+```sh
+TMPDIR=/Volumes/RAMDisk cargo insta test --workspace --test-runner nextest
+```
+
+You can double-check whether or not the RAM disk is mounted with
+
+```sh
+mount | grep tmpfs
+```
+
+<details> <summary> Some details and speculation </summary>
+
+<!-- MkDocs doesn't support Markdown markup inside `details` :( -->
+
+Hard drive speed is not the issue here. Experimentally, when <code>/tmp</code>
+is physical, Ilya experienced the tests doing writes at 60MB/s (as reported by
+the Activity Monitor) on an SSD that should be many times as fast.
+
+Instead, it seems to have something to do with file locking and
+<code>fdatasync</code>. A likely curlprit is the presence of <a
+href="https://gregoryszorc.com/blog/2018/10/29/global-kernel-locks-in-apfs/">
+global kernel locks in APFS</a>. There are some benchmarks in
+<a href="https://github.com/jj-vcs/jj/pull/7493#issuecomment-3289020874">this
+PR</a>.
+
+It might be possible to add an entry to `/etc/fstab` to mount tmpfs
+automatically. If you succeed with this, let us (and Ilya in particular) know!
+
+</details>
 
 ### Editor setup
 
@@ -283,10 +347,81 @@ We recommend at least these settings:
 }
 ```
 
+#### Helix
+
+```toml
+# .helix/languages.toml
+[language-server.rust-analyzer.config.rustfmt]
+extraArgs = ["+nightly"]
+```
+
+### Alternative development setup with Nix
+
+If you have [Nix](https://nixos.org/) installed, you can use the provided
+`flake.nix` to get a development environment with all necessary tools
+pre-configured:
+
+```shell
+nix develop
+```
+
+Once inside the shell, you can run `cargo build`, `cargo test` etc. as usual.
+Other tools like `uv`, `cargo-insta`, `cargo-nextest` and more are installed,
+and so you should be able to follow any other recommendations in this guide as
+needed.
+
+!!! tip "Editor integration"
+
+    Launch your editor from within the `nix develop` shell so that
+    rust-analyzer and other LSP tools can find the correct toolchain. For
+    example:
+
+    ```shell
+    nix develop
+    code .  # or your editor of choice
+    ```
+
+!!! note "direnv users"
+
+    If you use [direnv](https://direnv.net/) with
+    [nix-direnv](https://github.com/nix-community/nix-direnv), you can `echo
+    "source_env .envrc.recommended" >> .envrc` to automatically activate the
+    development environment when entering the directory.
+
+### Alternative development setup with `mise`
+
+An experimental development setup is available using
+[`mise`](https://mise.jdx.dev/). If you try it, file bugs,
+PRs, or tell us on Discord/IRC/discussions if you experience problems
+or if this config is too inflexible. If we can make it work for most
+platforms and most people's needs, including people previously unfamiliar
+with `mise`, we may make `mise` the recommended way to set up a development
+environment.
+
+This tool manages the necessary dependencies for you, eliminating the need for
+a separate setup process. `mise` automatically installs the required tools when
+they are needed.
+
+Here are some of the commands you may find yourself using frequently during
+development:
+
+* `mise test`: Runs all tests.
+* `mise test <string>`: Runs tests that contain a specific string. For
+  example, `mise test squash` would run tests with "squash" in their name.
+* `mise build`: Compiles `jj`.
+* `mise build:release`: Compiles `jj` in release mode.
+* `mise build:docs`: Builds the documentation for `jj`.
+
+For a complete list of all available tasks, you can run `mise tasks` or review
+the configuration file at `.config/mise.toml`.
+
+You can customize this configuration using
+[a `mise.local.toml` file](https://mise.jdx.dev/configuration.html#mise-toml).
+
 ## Previewing the HTML documentation
 
 The documentation for `jj` is automatically published online at
-<https://jj-vcs.github.io/jj/>.
+<https://docs.jj-vcs.dev/>.
 
 When editing documentation, you should check your changes locally — especially
 if you are adding a new page, or doing a major rewrite.
@@ -376,8 +511,8 @@ MKDOCS_OFFLINE=true uv run mkdocs build
 
 The full `jj` website includes the documentation for several `jj` versions
 (`prerelease`, latest release, and the older releases). The top-level
-URL <https://jj-vcs.github.io/jj> redirects to
-<https://jj-vcs.github.io/jj/latest>, which in turn redirects to
+URL <https://docs.jj-vcs.dev> redirects to
+<https://docs.jj-vcs.dev/latest>, which in turn redirects to
 the docs for the last stable version.
 
 The different versions of documentation are managed and deployed with
@@ -387,9 +522,8 @@ The different versions of documentation are managed and deployed with
 On a POSIX system or WSL, one way to build the entire website is as follows (on
 Windows, you'll need to understand and adapt the shell script):
 
-1. Check out `jj` as a co-located `jj + git` repository (`jj clone --colocate`),
-cloned from your fork of `jj` (e.g. `github.com/jjfan/jj`). You can also use a
-pure Git repo if you prefer.
+1. Check out `jj` (`jj git clone`), cloned from your fork of `jj` (e.g.
+  `github.com/jjfan/jj`). You can also use a pure Git repo if you prefer.
 
 2. Make sure `github.com/jjfan/jj` includes the `gh-pages` bookmark of the jj repo
 and run `git fetch origin gh-pages`.
@@ -447,14 +581,13 @@ If you need to do something more complicated, you can use `uv run mike
 ...` commands. You can also edit the `gh-pages` bookmark directly, but take care
 to avoid files that will be overwritten by future invocations of `mike`. Then,
 you can submit a PR based on the `gh-pages` bookmark of
-<https://jj-vcs.github.com/jj> (instead of the usual `main` bookmark).
+<https://docs.jj-vcs.dev/> (instead of the usual `main` bookmark).
 
 Previously, the version switcher would not work unless the value of the
 `site_url` config in `mkdocs.yml` matched the actual URL the site is being
 served from. This bug should now be fixed, but if you are not serving the site
-from https://jj-vcs.github.com/jj and something does not work weirdly, you might
-want to adjust the `site_url` to something like `https://jjfan.github.io/jj`.
-
+from <https://docs.jj-vcs.dev/> and something fails weirdly, you might want
+to adjust the `site_url` to something like `https://jjfan.github.io/jj`.
 
 ## Modifying protobuffers (this is not common)
 
@@ -490,18 +623,74 @@ turns on `debug` log level for `jj-lib` and `jj-cli` only.
 
 ## Profiling
 
+### Introduction
+
+jj provides two main approaches to profiling:
+
+1. **Tracing-based profiling** - Uses the Rust `tracing` crate to record spans
+   and events. Good for understanding control flow and finding where time is spent
+   in instrumented code.
+2. **Sampling-based profiling** - Uses system profilers (perf, dtrace) to sample
+   the call stack. Good for finding hot spots including in uninstrumented code and
+   external libraries.
+
+### Tracing-based profiling
+
+jj uses the `tracing` crate with Chrome Trace Format output.
+
+Set the `JJ_TRACE` environment variable to generate a trace file:
+
+```shell
+# Generate trace with auto-generated filename (jj-trace-{timestamp}.json)
+JJ_TRACE= jj st
+
+# Generate trace with specific filename
+JJ_TRACE=/tmp/trace.json jj st
+```
+
+To include function argument values in the trace (useful for detailed
+debugging):
+
+```shell
+JJ_TRACE_INCLUDE_ARGS=1 JJ_TRACE=/tmp/trace.json jj log -r 'ancestors(@, 10)'
+```
+
+The produced profiles can be imported into chrome://tracing (on Google Chrome)
+or https://ui.perfetto.dev/ (all browsers).
+
+Only functions annotated with `#[tracing::instrument]` or explicit `trace_span!`
+macros appear in traces. If you need to profile a specific area that isn't
+instrumented, you can add `#[instrument]` attributes to the relevant functions.
+
+### Sampling-based profiling
+
+Sampling profilers periodically capture the call stack to identify hot spots. This approach:
+
+- Has lower overhead than tracing
+- Captures all code, including uninstrumented functions and external libraries (like gitoxide)
+- May miss short-lived function calls since it samples rather than traces every
+  call
+
+#### Using samply
+
 One easy-to-use sampling profiler
 is [samply](https://github.com/mstange/samply). For example:
+
 ```shell
 cargo install samply
 samply record jj diff
 ```
+
 Then just open the link it prints.
 
-Another option is to use the instrumentation we've added manually (using
-`tracing::instrument`) in various places. For example:
+#### Using cargo-flamegraph
+
+[cargo-flamegraph](https://github.com/flamegraph-rs/flamegraph) generates flamegraph visualizations using system profilers:
+
 ```shell
-JJ_TRACE=/tmp/trace.json jj diff
+cargo install flamegraph
+cargo flamegraph --bin jj -- diff
 ```
-Then go to `https://ui.perfetto.dev/` in Chrome and load `/tmp/trace.json` from
-there.
+
+You may need to use `sudo` or install `perf` on your system, see flamegraph's
+documentation for more.

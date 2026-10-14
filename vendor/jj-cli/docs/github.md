@@ -2,13 +2,6 @@
 
 This guide assumes a basic understanding of either Git or Mercurial.
 
-## Set up an SSH key
-
-As of October 2023 it's recommended to set up an SSH key to work with GitHub
-projects. See [GitHub's Tutorial][gh]. This restriction may be lifted in the
-future, see [issue #469][http-auth] for more information and progress on
-authenticated HTTP.
-
 ## Basic workflow
 
 The simplest way to start with Jujutsu is to create a stack of commits first.
@@ -47,8 +40,10 @@ $ jj commit -m 'feat(bar): add support for bar'
 # Create a bookmark so we can push it to GitHub. Note that we created the bookmark
 # on the working-copy commit's *parent* because the working copy itself is empty.
 $ jj bookmark create bar -r @- # `bar` now contains the previous two commits.
+# Set the bookmark to be tracked on the remote.
+$ jj bookmark track bar
 # Push the bookmark to GitHub (pushes only `bar`)
-$ jj git push --allow-new
+$ jj git push
 ```
 
 While it's possible to create a bookmark in advance and commit on top of it in a
@@ -59,18 +54,19 @@ a new commits. Unlike Git, Jujutsu will not do it automatically.
 
 As of October 2023, Jujutsu has no equivalent to a `git pull` command (see
 [issue #1039][sync-issue]). Until such a command is added, you need to use
-`jj git fetch` followed by a `jj rebase -d $main_bookmark` to update your
+`jj git fetch` followed by a `jj rebase -o $main_bookmark` to update your
 changes.
 
 [sync-issue]: https://github.com/jj-vcs/jj/issues/1039
 
-## Working in a Git co-located repository
+## Working in a Git colocated workspaces
 
-After doing `jj git init --colocate`, Git will be in a [detached HEAD
-state][detached], which is unusual, as Git mainly works with named branches; jj
-does not.
+After doing `jj git init`, which
+[colocates](git-compatibility.md#colocated-jujutsugit-repos) the `.jj` and
+`.git` directories, Git will be in a [detached HEAD state][detached], which is
+unusual, as Git mainly works with named branches; jj does not.
 
-In a co-located repository, every `jj` command will automatically synchronize
+In a colocated workspace, every `jj` command will automatically synchronize
 Jujutsu's view of the repo with Git's view. For example, `jj commit` updates the
 HEAD of the Git repository, enabling an incremental migration.
 
@@ -80,7 +76,8 @@ $ # Do some more work.
 $ jj commit -m "Update tutorial"
 # Create a bookmark on the working-copy commit's parent
 $ jj bookmark create doc-update -r @-
-$ jj git push --allow-new
+$ jj bookmark track doc-update
+$ jj git push
 ```
 
 ## Working in a Jujutsu repository
@@ -162,8 +159,7 @@ $ # force push
 $ jj git push --bookmark your-feature
 ```
 
-The hyphen after `your-feature` comes from the
-[revset](https://github.com/jj-vcs/jj/blob/main/docs/revsets.md) syntax.
+The hyphen after `your-feature` comes from the [revset](revsets.md) syntax.
 
 ## Working with other people's bookmarks
 
@@ -173,15 +169,16 @@ local bookmarks. This means that if you want to iterate or test another
 contributor's bookmark, you'll need to do `jj new <bookmark>@<remote>` onto it.
 
 If you want to import all remote bookmarks including inactive ones, set
-`git.auto-local-bookmark = true` in the config file. Then you can specify a
-contributor's bookmark as `jj new <bookmark>` instead of `jj new <bookmark>@<remote>`.
+`remotes.<name>.auto-track-bookmarks = "*"` in the config file. Then you can
+specify a contributor's bookmark as `jj new <bookmark>` instead of `jj new
+<bookmark>@<remote>`.
 
 You can find more information on that setting [here][auto-bookmark].
 
 ## Using GitHub CLI
 
 GitHub CLI will have trouble finding the proper Git repository path in jj repos
-that aren't [co-located](./git-compatibility.md#co-located-jujutsugit-repos)
+that aren't [colocated](./git-compatibility.md#colocated-jujutsugit-repos)
 (see [issue #1008]). You can configure the `$GIT_DIR` environment variable to
 point it to the right path:
 
@@ -198,7 +195,7 @@ export GIT_DIR=$PWD/.jj/repo/store/git
 ```
 
 and run `direnv allow` to approve it for direnv to run. Then GitHub CLI will
-work automatically even in repos that aren't co-located so you can execute
+work automatically even in workspaces that aren't colocated so you can execute
 commands like `gh issue list` normally.
 
 [issue #1008]: https://github.com/jj-vcs/jj/issues/1008
@@ -244,10 +241,8 @@ the [tutorial][tut].
     If you're wondering why we prefer clean commits in this project, see
     e.g. [this blog post][stacked]
 
-[auto-bookmark]: config.md#automatic-local-bookmark-creation
+[auto-bookmark]: config.md#automatic-tracking-of-bookmarks
 [detached]: https://git-scm.com/docs/git-checkout#_detached_head
-[gh]: https://docs.github.com/en/authentication/connecting-to-github-with-ssh/generating-a-new-ssh-key-and-adding-it-to-the-ssh-agent
-[http-auth]: https://github.com/jj-vcs/jj/issues/469
 [tut]: tutorial.md#conflicts
 [stacked]: https://jg.gg/2018/09/29/stacked-diffs-versus-pull-requests/
 

@@ -20,45 +20,42 @@ use std::iter;
 use clap_complete::ArgValueCompleter;
 use itertools::Itertools as _;
 use jj_lib::backend::Signature;
-use jj_lib::commit::CommitIteratorExt as _;
 use jj_lib::object_id::ObjectId as _;
+use jj_lib::repo::Repo as _;
+use jj_lib::revset::RevsetIteratorExt as _;
 use tracing::instrument;
 
 use crate::cli_util::CommandHelper;
 use crate::cli_util::RevisionArg;
-use crate::command_error::user_error;
 use crate::command_error::CommandError;
+use crate::command_error::user_error;
 use crate::complete;
+use crate::description_util::ParsedBulkEditMessage;
 use crate::description_util::add_trailers_with_template;
 use crate::description_util::description_template;
 use crate::description_util::edit_description;
 use crate::description_util::edit_multiple_descriptions;
 use crate::description_util::join_message_paragraphs;
 use crate::description_util::parse_trailers_template;
-use crate::description_util::ParsedBulkEditMessage;
+use crate::text_util::complete_newline;
 use crate::text_util::parse_author;
 use crate::ui::Ui;
 
-/// Update the change description or other metadata
+/// Update the change description or other metadata [default alias: desc]
 ///
 /// Starts an editor to let you edit the description of changes. The editor
-/// will be $EDITOR, or `pico` if that's not defined (`Notepad` on Windows).
+/// will be $EDITOR, or `nano` if that's not defined (`Notepad` on Windows).
 #[derive(clap::Args, Clone, Debug)]
-#[command(visible_aliases = &["desc"])]
 pub(crate) struct DescribeArgs {
-    /// The revision(s) whose description to edit (default: @)
-    #[arg(
-        value_name = "REVSETS",
-        add = ArgValueCompleter::new(complete::revset_expression_mutable)
-    )]
+    /// The revision(s) whose description to edit (default: @) [aliases: -r]
+    #[arg(value_name = "REVSETS")]
+    #[arg(add = ArgValueCompleter::new(complete::revset_expression_mutable))]
     revisions_pos: Vec<RevisionArg>,
-    #[arg(
-        short = 'r',
-        hide = true,
-        value_name = "REVSETS",
-        add = ArgValueCompleter::new(complete::revset_expression_mutable)
-    )]
+
+    #[arg(short = 'r', hide = true, value_name = "REVSETS")]
+    #[arg(add = ArgValueCompleter::new(complete::revset_expression_mutable))]
     revisions_opt: Vec<RevisionArg>,
+
     /// The change description to use (don't open editor)
     ///
     /// If multiple revisions are specified, the same description will be used
@@ -70,39 +67,57 @@ pub(crate) struct DescribeArgs {
         conflicts_with = "stdin"
     )]
     message_paragraphs: Vec<String>,
+
     /// Read the change description from stdin
     ///
     /// If multiple revisions are specified, the same description will be used
     /// for all of them.
     #[arg(long)]
     stdin: bool,
+
+    // TODO: Delete in jj 0.40.0+
     /// Don't open an editor
     ///
     /// This is mainly useful in combination with e.g. `--reset-author`.
-    #[arg(long, conflicts_with = "edit")]
+    #[arg(long, hide = true, conflicts_with_all = ["edit", "editor"])]
     no_edit: bool,
-    /// Open an editor
+
+    /// Open an editor to edit the change description
     ///
     /// Forces an editor to open when using `--stdin` or `--message` to
     /// allow the message to be edited afterwards.
     #[arg(long)]
-    edit: bool,
-    /// Reset the author to the configured user
+    editor: bool,
+
+    // TODO: Delete in jj 0.42.0+
+    /// Open an editor to edit the change description
     ///
-    /// This resets the author name, email, and timestamp.
+    /// Forces an editor to open when using `--stdin` or `--message` to
+    /// allow the message to be edited afterwards.
+    #[arg(long, hide = true, conflicts_with = "editor")]
+    edit: bool,
+
+    // TODO: Delete in jj 0.40.0+
+    /// Reset the author name, email, and timestamp
+    ///
+    /// This resets the author name and email to the configured user and sets
+    /// the author timestamp to the current time.
     ///
     /// You can use it in combination with the JJ_USER and JJ_EMAIL
     /// environment variables to set a different author:
     ///
     /// $ JJ_USER='Foo Bar' JJ_EMAIL=foo@bar.com jj describe --reset-author
-    #[arg(long)]
+    #[arg(long, hide = true)]
     reset_author: bool,
+
+    // TODO: Delete in jj 0.40.0+
     /// Set author to the provided string
     ///
     /// This changes author name and email while retaining author
     /// timestamp for non-discardable commits.
     #[arg(
         long,
+        hide = true,
         conflicts_with = "reset_author",
         value_parser = parse_author
     )]
@@ -115,47 +130,72 @@ pub(crate) fn cmd_describe(
     command: &CommandHelper,
     args: &DescribeArgs,
 ) -> Result<(), CommandError> {
+    if args.no_edit {
+        writeln!(
+            ui.warning_default(),
+            "`jj describe --no-edit` is deprecated; use `jj metaedit` instead"
+        )?;
+    }
+    if args.edit {
+        writeln!(
+            ui.warning_default(),
+            "`jj describe --edit` is deprecated; use `jj describe --editor` instead"
+        )?;
+    }
+    if args.reset_author {
+        writeln!(
+            ui.warning_default(),
+            "`jj describe --reset-author` is deprecated; use `jj metaedit --update-author` instead"
+        )?;
+    }
+    if args.author.is_some() {
+        writeln!(
+            ui.warning_default(),
+            "`jj describe --author` is deprecated; use `jj metaedit --author` instead"
+        )?;
+    }
     let mut workspace_command = command.workspace_helper(ui)?;
-    let commits: Vec<_> = if !args.revisions_pos.is_empty() || !args.revisions_opt.is_empty() {
+    let target_expr = if !args.revisions_pos.is_empty() || !args.revisions_opt.is_empty() {
         workspace_command
             .parse_union_revsets(ui, &[&*args.revisions_pos, &*args.revisions_opt].concat())?
     } else {
         workspace_command.parse_revset(ui, &RevisionArg::AT)?
     }
-    .evaluate_to_commits()?
-    .try_collect()?; // in reverse topological order
+    .resolve()?;
+    workspace_command.check_rewritable_expr(&target_expr)?;
+    let commits: Vec<_> = target_expr
+        .evaluate(workspace_command.repo().as_ref())?
+        .iter()
+        .commits(workspace_command.repo().store()) // in reverse topological order
+        .try_collect()?;
     if commits.is_empty() {
         writeln!(ui.status(), "No revisions to describe.")?;
         return Ok(());
     }
-    workspace_command.check_rewritable(commits.iter().ids())?;
     let text_editor = workspace_command.text_editor()?;
 
     let mut tx = workspace_command.start_transaction();
-    let tx_description = if commits.len() == 1 {
-        format!("describe commit {}", commits[0].id().hex())
-    } else {
-        format!(
-            "describe commit {} and {} more",
-            commits[0].id().hex(),
-            commits.len() - 1
-        )
+    let tx_description = match commits.as_slice() {
+        [] => unreachable!(),
+        [commit] => format!("describe commit {}", commit.id().hex()),
+        [first_commit, remaining_commits @ ..] => {
+            format!(
+                "describe commit {} and {} more",
+                first_commit.id().hex(),
+                remaining_commits.len()
+            )
+        }
     };
 
     let shared_description = if args.stdin {
         let mut buffer = String::new();
         io::stdin().read_to_string(&mut buffer)?;
-        Some(buffer)
+        Some(complete_newline(buffer))
     } else if !args.message_paragraphs.is_empty() {
         Some(join_message_paragraphs(&args.message_paragraphs))
     } else {
         None
     };
-
-    // edit and no_edit are conflicting arguments and therefore it should not
-    // be possible for both to be true at the same time.
-    assert!(!(args.edit && args.no_edit));
-    let use_editor = args.edit || (shared_description.is_none() && !args.no_edit);
 
     let mut commit_builders = commits
         .iter()
@@ -179,6 +219,8 @@ pub(crate) fn cmd_describe(
             commit_builder
         })
         .collect_vec();
+
+    let use_editor = args.editor || args.edit || (shared_description.is_none() && !args.no_edit);
 
     if let Some(trailer_template) = parse_trailers_template(ui, &tx)? {
         for commit_builder in &mut commit_builders {
@@ -206,7 +248,8 @@ pub(crate) fn cmd_describe(
             .try_collect()?;
 
         if let [(_, temp_commit)] = &*temp_commits {
-            let template = description_template(ui, &tx, "", temp_commit)?;
+            let intro = "";
+            let template = description_template(ui, &tx, intro, temp_commit)?;
             let description = edit_description(&text_editor, &template)?;
             commit_builders[0].set_description(description);
         } else {
@@ -260,14 +303,15 @@ pub(crate) fn cmd_describe(
 
     let mut num_described = 0;
     let mut num_reparented = 0;
-    // Even though `MutRepo::rewrite_commit` and `MutRepo::rebase_descendants` can
-    // handle rewriting of a commit even if it is a descendant of another commit
-    // being rewritten, using `MutRepo::transform_descendants` prevents us from
-    // rewriting the same commit multiple times, and adding additional entries
-    // in the predecessor chain.
+    // Even though `MutableRepo::rewrite_commit` and
+    // `MutableRepo::rebase_descendants` can handle rewriting of a commit even
+    // if it is a descendant of another commit being rewritten, using
+    // `MutableRepo::transform_descendants` prevents us from rewriting the same
+    // commit multiple times, and adding additional entries in the predecessor
+    // chain.
     tx.repo_mut().transform_descendants(
         commit_builders.keys().map(|&id| id.clone()).collect(),
-        |rewriter| {
+        async |rewriter| {
             let old_commit_id = rewriter.old_commit().id().clone();
             let commit_builder = rewriter.reparent();
             if let Some(temp_builder) = commit_builders.get(&old_commit_id) {

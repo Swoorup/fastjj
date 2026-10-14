@@ -24,14 +24,14 @@ use std::time::Instant;
 use clap::Subcommand;
 use criterion::Criterion;
 
-use self::common_ancestors::cmd_bench_common_ancestors;
 use self::common_ancestors::BenchCommonAncestorsArgs;
-use self::is_ancestor::cmd_bench_is_ancestor;
+use self::common_ancestors::cmd_bench_common_ancestors;
 use self::is_ancestor::BenchIsAncestorArgs;
-use self::resolve_prefix::cmd_bench_resolve_prefix;
+use self::is_ancestor::cmd_bench_is_ancestor;
 use self::resolve_prefix::BenchResolvePrefixArgs;
-use self::revset::cmd_bench_revset;
+use self::resolve_prefix::cmd_bench_resolve_prefix;
 use self::revset::BenchRevsetArgs;
+use self::revset::cmd_bench_revset;
 use crate::cli_util::CommandHelper;
 use crate::command_error::CommandError;
 use crate::ui::Ui;
@@ -64,9 +64,11 @@ struct CriterionArgs {
     /// Name of baseline to save results
     #[arg(long, short = 's', group = "baseline_mode", default_value = "base")]
     save_baseline: String,
+
     /// Name of baseline to compare with
     #[arg(long, short = 'b', group = "baseline_mode")]
     baseline: Option<String>,
+
     /// Sample size for the benchmarks, which must be at least 10
     #[arg(long, default_value_t = 100, value_parser = clap::value_parser!(u32).range(10..))]
     sample_size: u32, // not usize because https://github.com/clap-rs/clap/issues/4253

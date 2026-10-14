@@ -14,9 +14,9 @@
 
 use crate::cli_util::CommandHelper;
 use crate::command_error::CommandError;
-use crate::movement_util::move_to_commit;
 use crate::movement_util::Direction;
 use crate::movement_util::MovementArgs;
+use crate::movement_util::move_to_commit;
 use crate::ui::Ui;
 /// Change the working copy revision relative to the parent revision
 ///
@@ -52,18 +52,21 @@ pub(crate) struct PrevArgs {
     /// How many revisions to move backward. Moves to the parent by default
     #[arg(default_value = "1")]
     offset: u64,
+
     /// Edit the parent directly, instead of moving the working-copy commit
     ///
     /// Takes precedence over config in `ui.movement.edit`; i.e.
     /// will negate `ui.movement.edit = false`
     #[arg(long, short)]
     edit: bool,
+
     /// The inverse of `--edit`
     ///
     /// Takes precedence over config in `ui.movement.edit`; i.e.
     /// will negate `ui.movement.edit = true`
     #[arg(long, short, conflicts_with = "edit")]
     no_edit: bool,
+
     /// Jump to the previous conflicted ancestor
     #[arg(long, conflicts_with = "offset")]
     conflict: bool,
@@ -71,7 +74,7 @@ pub(crate) struct PrevArgs {
 
 impl From<&PrevArgs> for MovementArgs {
     fn from(val: &PrevArgs) -> Self {
-        MovementArgs {
+        Self {
             offset: val.offset,
             edit: val.edit,
             no_edit: val.no_edit,

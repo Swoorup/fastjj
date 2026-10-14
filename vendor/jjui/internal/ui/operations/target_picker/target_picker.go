@@ -1,0 +1,369 @@
+package target_picker
+
+import (
+	"strings"
+
+	"charm.land/bubbles/v2/textinput"
+	tea "charm.land/bubbletea/v2"
+	"charm.land/lipgloss/v2"
+	"github.com/idursun/jjui/internal/jj"
+	"github.com/idursun/jjui/internal/jj/source"
+	"github.com/idursun/jjui/internal/ui/actions"
+	"github.com/idursun/jjui/internal/ui/common"
+	"github.com/idursun/jjui/internal/ui/context"
+	"github.com/idursun/jjui/internal/ui/fuzzy_search"
+	"github.com/idursun/jjui/internal/ui/intents"
+	"github.com/idursun/jjui/internal/ui/layout"
+	"github.com/idursun/jjui/internal/ui/operations"
+	"github.com/idursun/jjui/internal/ui/render"
+	"github.com/idursun/jjui/internal/ui/theme"
+	"github.com/sahilm/fuzzy"
+)
+
+const (
+	maxWidth  = 80
+	maxHeight = 20
+	pillWidth = 8
+)
+
+var (
+	_ operations.Operation = (*Model)(nil)
+	_ common.ScopeProvider = (*Model)(nil)
+	_ common.ScopeHandler  = (*Model)(nil)
+	_ common.Focusable     = (*Model)(nil)
+	_ common.Editable      = (*Model)(nil)
+	_ common.Overlay       = (*Model)(nil)
+)
+
+type Model struct {
+	context             *context.MainContext
+	items               []source.Item
+	input               textinput.Model
+	cursor              int
+	matches             fuzzy.Matches
+	fzfSource           *fuzzy_search.RefinedSource
+	listRenderer        *render.ListRenderer
+	ensureCursorVisible bool
+	payload             any
+	sources             []source.Source
+}
+
+type itemsLoadedMsg struct {
+	items []source.Item
+}
+
+type itemClickedMsg struct {
+	index int
+}
+
+type itemScrollMsg struct {
+	Delta      int
+	Horizontal bool
+}
+
+func (m itemScrollMsg) SetDelta(delta int, horizontal bool) tea.Msg {
+	m.Delta = delta
+	m.Horizontal = horizontal
+	return m
+}
+
+type TargetSelectedMsg struct {
+	Target  string
+	File    jj.FileName
+	Force   bool
+	Payload any
+}
+
+type TargetPickerCancelMsg struct{}
+
+func (m *Model) IsFocused() bool { return true }
+func (m *Model) IsEditing() bool { return true }
+func (m *Model) IsOverlay() bool { return true }
+
+func (m *Model) Name() string { return "target_picker" }
+
+func (m *Model) Render(_ *jj.Commit, _ operations.RenderPosition) string { return "" }
+
+func (m *Model) Scopes() []common.Scope {
+	return []common.Scope{
+		{
+			Name:    actions.ScopeTargetPicker,
+			Leak:    common.LeakNone,
+			Handler: m,
+		},
+	}
+}
+
+func NewModel(ctx *context.MainContext, payload any, sources ...source.Source) *Model {
+	ti := textinput.New()
+	ti.Prompt = "> "
+	ti.CharLimit = 0
+	ti.SetVirtualCursor(false)
+	ti.Focus()
+
+	m := &Model{
+		context:             ctx,
+		input:               ti,
+		cursor:              0,
+		listRenderer:        render.NewListRenderer(itemScrollMsg{}),
+		ensureCursorVisible: true,
+		payload:             payload,
+		sources:             sources,
+	}
+	m.listRenderer.Z = render.ZMenuContent
+	return m
+}
+
+func (m *Model) Init() tea.Cmd {
+	return m.fetchItems()
+}
+
+func (m *Model) Update(msg tea.Msg) tea.Cmd {
+	switch msg := msg.(type) {
+	case itemsLoadedMsg:
+		m.items = msg.items
+		m.fzfSource = &fuzzy_search.RefinedSource{Source: m}
+		m.listRenderer.StartLine = 0
+		m.search("")
+		return textinput.Blink
+	case itemClickedMsg:
+		m.cursor = msg.index
+		m.ensureCursorVisible = true
+		return m.accept(false)
+	case itemScrollMsg:
+		if msg.Horizontal {
+			return nil
+		}
+		m.ensureCursorVisible = false
+		m.listRenderer.StartLine += msg.Delta
+		if m.listRenderer.StartLine < 0 {
+			m.listRenderer.StartLine = 0
+		}
+	case intents.Intent:
+		var cmd, _ = m.HandleIntent(msg)
+		return cmd
+	case tea.KeyMsg, tea.PasteMsg:
+		var cmd tea.Cmd
+		m.input, cmd = m.input.Update(msg)
+		m.search(m.input.Value())
+		return cmd
+	}
+	return nil
+}
+
+func (m *Model) HandleIntent(intent intents.Intent) (tea.Cmd, bool) {
+	switch intent := intent.(type) {
+	case intents.TargetPickerCancel:
+		return func() tea.Msg { return TargetPickerCancelMsg{} }, true
+	case intents.TargetPickerApply:
+		return m.accept(intent.Force), true
+	case intents.TargetPickerNavigate:
+		if intent.Delta < 0 {
+			m.cursorUp()
+		} else if intent.Delta > 0 {
+			m.cursorDown()
+		}
+		return nil, true
+	case intents.AutocompleteCycle:
+		if intent.Reverse {
+			m.cursorUp()
+		} else {
+			m.cursorDown()
+		}
+		return nil, true
+	}
+	return nil, false
+}
+
+func (m *Model) ViewRect(dl *render.DisplayContext, box layout.Box) {
+	if box.R.Dx() <= 0 || box.R.Dy() <= 0 {
+		return
+	}
+
+	bookmarkPillStyle := theme.DefaultPalette.Get("picker", "", "bookmark", false)
+	selectedStyle := theme.DefaultPalette.GetBlended("picker", "", "", true)
+	selectedTextStyle := theme.DefaultPalette.GetBlended("picker", "", "text", true)
+	borderStyle := theme.DefaultPalette.GetBorder("picker", "", "border", false, lipgloss.NormalBorder())
+	textStyle := theme.DefaultPalette.Get("picker", "", "text", false)
+	dimmedStyle := theme.DefaultPalette.Get("picker", "", "dimmed", false)
+
+	maxW := min(maxWidth, box.R.Dx())
+	maxH := min(maxHeight, box.R.Dy())
+	centeredBox := box.Center(maxW, maxH)
+
+	frame := centeredBox
+	dl.AddBackdrop(box.R, render.ZMenuBorder-1)
+	borderContent := borderStyle.Width(frame.R.Dx()).Height(frame.R.Dy()).Render("")
+	dl.AddDraw(frame.R, borderContent, render.ZMenuBorder)
+	centeredBox = centeredBox.Inset(1)
+
+	inputBox, listBox := centeredBox.CutTop(1)
+	m.input.SetWidth(inputBox.R.Dx())
+
+	tis := m.input.Styles()
+	tis.Focused.Prompt = dimmedStyle
+	tis.Focused.Text = textStyle
+	tis.Blurred.Prompt = dimmedStyle
+	tis.Blurred.Text = textStyle
+	m.input.SetStyles(tis)
+
+	dl.AddDraw(inputBox.R, m.input.View(), render.ZMenuContent)
+	dl.SetCursorInRect(m.input.Cursor(), inputBox.R, 0, 0)
+
+	m.listRenderer.Render(
+		dl,
+		listBox,
+		len(m.matches),
+		m.cursor,
+		m.ensureCursorVisible,
+		func(_ int) int { return 1 },
+		func(dl *render.DisplayContext, index int, rect layout.Rectangle) {
+			if index < 0 || index >= len(m.matches) {
+				return
+			}
+			match := m.matches[index]
+			item := m.items[match.Index]
+			y := rect.Min.Y
+
+			isSelected := index == m.cursor
+			getStyle := theme.DefaultPalette.Get
+			if isSelected {
+				getStyle = theme.DefaultPalette.GetBlended
+			}
+			pillStyle := getStyle("picker", "", "dimmed", isSelected)
+			lineStyle := bookmarkPillStyle
+			matchStyle := getStyle("picker", "", "matched", isSelected)
+			if isSelected {
+				lineStyle = selectedTextStyle
+				dl.AddFill(rect, ' ', selectedStyle, render.ZMenuContent-1)
+			} else {
+				matchStyle = matchStyle.Inherit(lineStyle)
+			}
+			pillText := m.renderPill(item.Kind, pillStyle)
+			pillRect := layout.Rect(rect.Min.X, y, pillWidth, 1)
+			dl.AddDraw(pillRect, pillText, render.ZMenuContent)
+
+			nameContent := fuzzy_search.HighlightMatched(item.Name, match, lineStyle, matchStyle)
+			nameX := rect.Min.X + pillWidth + 1
+			nameWidth := min(lipgloss.Width(nameContent), rect.Dx()-pillWidth-1)
+			if nameWidth > 0 {
+				nameRect := layout.Rect(nameX, y, nameWidth, 1)
+				dl.AddDraw(nameRect, nameContent, render.ZMenuContent)
+			}
+		},
+		func(index int, _ tea.Mouse) tea.Msg { return itemClickedMsg{index: index} },
+	)
+	m.listRenderer.RegisterScroll(dl, listBox)
+	m.ensureCursorVisible = false
+}
+
+func (m *Model) renderPill(kind source.Kind, style lipgloss.Style) string {
+	switch kind {
+	case source.KindBookmark:
+		return style.Width(pillWidth).Align(lipgloss.Right).Render("bookmark")
+	case source.KindTag:
+		return style.Width(pillWidth).Align(lipgloss.Right).Render("tag")
+	case source.KindFunction:
+		return style.Width(pillWidth).Align(lipgloss.Right).Render("function")
+	case source.KindAlias:
+		return style.Width(pillWidth).Align(lipgloss.Right).Render("alias")
+	case source.KindHistory:
+		return style.Width(pillWidth).Align(lipgloss.Right).Render("history")
+	case source.KindFile:
+		return style.Width(pillWidth).Align(lipgloss.Right).Render("file")
+	case source.KindRemote:
+		return style.Width(pillWidth).Align(lipgloss.Right).Render("remote")
+	case source.KindComment:
+		return style.Width(pillWidth).Align(lipgloss.Right).Render("comment")
+	case source.KindRevision:
+		return style.Width(pillWidth).Align(lipgloss.Right).Render("revision")
+	default:
+		return strings.Repeat(" ", pillWidth)
+	}
+}
+
+func (m *Model) fetchItems() tea.Cmd {
+	return func() tea.Msg {
+		items := source.FetchAll(m.context.RunCommandImmediate, m.sources...)
+		for i := range items {
+			if !items[i].File.IsEmpty() {
+				items[i].Name = items[i].File.Display(m.context.Location, m.context.WorkingDirectory)
+			}
+		}
+		return itemsLoadedMsg{items: items}
+	}
+}
+
+func (m *Model) search(input string) {
+	if m.fzfSource == nil {
+		return
+	}
+	m.matches = m.fzfSource.Search(input, len(m.items))
+	if len(m.matches) == 0 {
+		m.cursor = -1
+		m.listRenderer.StartLine = 0
+		return
+	}
+	if m.cursor < 0 {
+		m.cursor = 0
+	}
+	if m.cursor >= len(m.matches) {
+		m.cursor = len(m.matches) - 1
+	}
+	m.ensureCursorVisible = true
+}
+
+func (m *Model) cursorUp() {
+	if len(m.matches) == 0 {
+		return
+	}
+	m.cursor--
+	if m.cursor < 0 {
+		m.cursor = len(m.matches) - 1
+	}
+	m.ensureCursorVisible = true
+}
+
+func (m *Model) cursorDown() {
+	if len(m.matches) == 0 {
+		return
+	}
+	m.cursor++
+	if m.cursor >= len(m.matches) {
+		m.cursor = 0
+	}
+	m.ensureCursorVisible = true
+}
+
+func (m *Model) accept(force bool) tea.Cmd {
+	if m.cursor >= 0 && m.cursor < len(m.matches) {
+		item := m.items[m.matches[m.cursor].Index]
+		if !item.File.IsEmpty() {
+			return func() tea.Msg {
+				return TargetSelectedMsg{File: item.File, Force: force, Payload: m.payload}
+			}
+		}
+		return func() tea.Msg {
+			target := item.Value
+			if target == "" {
+				target = item.Name
+			}
+			return TargetSelectedMsg{Target: target, Force: force, Payload: m.payload}
+		}
+	}
+	if input := strings.TrimSpace(m.input.Value()); input != "" {
+		return func() tea.Msg { return TargetSelectedMsg{Target: input, Force: force, Payload: m.payload} }
+	}
+	return nil
+}
+
+func (m *Model) Len() int {
+	return len(m.items)
+}
+
+func (m *Model) String(i int) string {
+	if i < 0 || i >= len(m.items) {
+		return ""
+	}
+	return m.items[i].Name
+}

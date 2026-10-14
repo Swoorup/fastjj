@@ -1,0 +1,545 @@
+package config
+
+import (
+	"encoding/json"
+	"fmt"
+	"os"
+	"path/filepath"
+	"slices"
+	"testing"
+
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+)
+
+//go:fix inline
+func boolPtr(v bool) *bool {
+	return new(v)
+}
+
+func TestLoadTheme(t *testing.T) {
+	themeData := []byte(`
+title = { fg = "blue", bold = true }
+selected = { fg = "white", bg = "blue" }
+error = "red"
+`)
+
+	theme, err := loadTheme(themeData, false)
+	require.NoError(t, err)
+
+	expected := map[string]Color{
+		"title":     {Fg: "blue", Bold: new(true)},
+		":selected": {Fg: "white", Bg: "blue"},
+		"error":     {Fg: "red"},
+	}
+
+	assert.EqualExportedValues(t, expected, theme.Colors)
+}
+
+func TestLoadStructuredThemeResolvesActiveVariant(t *testing.T) {
+	themeData := []byte(`
+[colors]
+title = "magenta"
+
+[light]
+background_blend = 0.2
+[light.colors]
+selected = { bg = "white" }
+
+[dark]
+background_blend = 0.6
+[dark.colors]
+selected = { bg = "bright black" }
+`)
+
+	light, err := loadTheme(themeData, false)
+	require.NoError(t, err)
+	assert.Equal(t, 0.2, light.BackgroundBlend)
+	assert.Equal(t, "magenta", light.Colors["title"].Fg)
+	assert.Equal(t, "white", light.Colors[":selected"].Bg)
+
+	dark, err := loadTheme(themeData, true)
+	require.NoError(t, err)
+	assert.Equal(t, 0.6, dark.BackgroundBlend)
+	assert.Equal(t, "bright black", dark.Colors[":selected"].Bg)
+}
+
+func TestLoadStructuredThemeRejectsInvalidBackgroundBlend(t *testing.T) {
+	for _, value := range []string{"1.5", "nan"} {
+		t.Run(value, func(t *testing.T) {
+			_, err := loadTheme([]byte(fmt.Sprintf(`
+[dark]
+background_blend = %s
+`, value)), true)
+			assert.ErrorContains(t, err, "invalid value for 'dark.background_blend'")
+		})
+	}
+}
+
+func TestLoadEmbeddedDefaultThemeResolvesLightAndDarkVariants(t *testing.T) {
+	light, err := LoadEmbeddedTheme("default", false)
+	require.NoError(t, err)
+	dark, err := LoadEmbeddedTheme("default", true)
+	require.NoError(t, err)
+
+	assert.Equal(t, 0.4, light.BackgroundBlend)
+	assert.Equal(t, "white", light.Colors[":selected"].Bg)
+	assert.Equal(t, "default", light.Colors["revset completion"].Bg)
+	assert.Equal(t, 0.4, dark.BackgroundBlend)
+	assert.Equal(t, "bright black", dark.Colors[":selected"].Bg)
+	assert.Equal(t, "black", dark.Colors["revset completion"].Bg)
+}
+
+func TestResolveThemeUsesDefaultThemeAsBaseWhenNoUserThemeConfigured(t *testing.T) {
+	originalUI := Current.UI
+	t.Cleanup(func() { Current.UI = originalUI })
+	Current.UI.Theme = ThemeConfig{}
+	Current.UI.Colors = map[string]Color{
+		"inline override": {Fg: "magenta"},
+	}
+	Current.UI.BackgroundBlend = BackgroundBlendConfig{}
+
+	theme, err := ResolveTheme(true, map[string]Color{
+		"jj override": {Fg: "cyan"},
+	})
+	require.NoError(t, err)
+
+	assert.Contains(t, theme.Colors, "dimmed")
+	assert.Equal(t, "cyan", theme.Colors["jj override"].Fg)
+	assert.Equal(t, "magenta", theme.Colors["inline override"].Fg)
+	assert.Equal(t, 0.4, theme.BackgroundBlend)
+}
+
+func TestResolveThemeUsesUserThemeInsteadOfDefaultTheme(t *testing.T) {
+	configDir := t.TempDir()
+	t.Setenv("JJUI_CONFIG_DIR", configDir)
+	require.NoError(t, os.MkdirAll(filepath.Join(configDir, "themes"), 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(configDir, "themes", "custom.toml"), []byte(`
+[colors]
+"custom base" = { fg = "yellow" }
+
+[dark]
+background_blend = 0.2
+`), 0o600))
+
+	originalUI := Current.UI
+	t.Cleanup(func() { Current.UI = originalUI })
+	Current.UI.Theme = ThemeConfig{Dark: "custom"}
+	Current.UI.Colors = map[string]Color{
+		"inline override": {Fg: "magenta"},
+	}
+	Current.UI.BackgroundBlend = BackgroundBlendConfig{}
+
+	theme, err := ResolveTheme(true, map[string]Color{
+		"jj override": {Fg: "cyan"},
+	})
+	require.NoError(t, err)
+
+	assert.NotContains(t, theme.Colors, "dimmed")
+	assert.Equal(t, "yellow", theme.Colors["custom base"].Fg)
+	assert.Equal(t, "cyan", theme.Colors["jj override"].Fg)
+	assert.Equal(t, "magenta", theme.Colors["inline override"].Fg)
+	assert.Equal(t, 0.2, theme.BackgroundBlend)
+}
+
+func TestResolveThemeUIBackgroundBlendOverridesTheme(t *testing.T) {
+	original := Current.UI.BackgroundBlend
+	t.Cleanup(func() { Current.UI.BackgroundBlend = original })
+
+	override := 0.4
+	Current.UI.BackgroundBlend = BackgroundBlendConfig{Value: &override}
+	theme, err := ResolveTheme(true, nil)
+	require.NoError(t, err)
+	assert.Equal(t, 0.4, theme.BackgroundBlend)
+
+	override = 0.0
+	theme, err = ResolveTheme(true, nil)
+	require.NoError(t, err)
+	assert.Zero(t, theme.BackgroundBlend)
+}
+
+func TestResolveThemeRejectsInvalidUIBackgroundBlend(t *testing.T) {
+	original := Current.UI.BackgroundBlend
+	t.Cleanup(func() { Current.UI.BackgroundBlend = original })
+
+	override := 1.5
+	Current.UI.BackgroundBlend = BackgroundBlendConfig{Value: &override}
+	_, err := ResolveTheme(true, nil)
+	assert.ErrorContains(t, err, "invalid value for 'ui.background_blend'")
+
+	override = -0.1
+	Current.UI.BackgroundBlend = BackgroundBlendConfig{Light: &override}
+	_, err = ResolveTheme(false, nil)
+	assert.ErrorContains(t, err, "invalid value for 'ui.background_blend.light'")
+}
+
+func TestResolveThemeUIBackgroundBlendUsesActiveModeOverride(t *testing.T) {
+	original := Current.UI.BackgroundBlend
+	t.Cleanup(func() { Current.UI.BackgroundBlend = original })
+
+	light, dark := 0.2, 0.6
+	Current.UI.BackgroundBlend = BackgroundBlendConfig{Light: &light, Dark: &dark}
+
+	theme, err := ResolveTheme(false, nil)
+	require.NoError(t, err)
+	assert.Equal(t, 0.2, theme.BackgroundBlend)
+
+	theme, err = ResolveTheme(true, nil)
+	require.NoError(t, err)
+	assert.Equal(t, 0.6, theme.BackgroundBlend)
+
+	Current.UI.BackgroundBlend = BackgroundBlendConfig{Light: &light}
+	theme, err = ResolveTheme(true, nil)
+	require.NoError(t, err)
+	assert.Equal(t, 0.4, theme.BackgroundBlend)
+}
+
+func findLastActionByName(actions []ActionConfig, name string) (ActionConfig, bool) {
+	for _, action := range slices.Backward(actions) {
+		if action.Name == name {
+			return action, true
+		}
+	}
+	return ActionConfig{}, false
+}
+
+func TestLoad_MergesActionsByName(t *testing.T) {
+	cfg := &Config{
+		Actions: []ActionConfig{
+			{Name: "open_details_alias", Lua: `print("default")`},
+			{Name: "my_action", Lua: "return 1"},
+		},
+	}
+
+	content := `
+[[actions]]
+name = "open_details_alias"
+lua = "print('override')"
+
+[[actions]]
+name = "new_action"
+lua = "return 2"
+`
+
+	require.NoError(t, cfg.Load(content, ""))
+	require.Len(t, cfg.Actions, 4)
+	action, ok := findLastActionByName(cfg.Actions, "open_details_alias")
+	require.True(t, ok)
+	assert.Equal(t, "print('override')", action.Lua)
+	_, ok = findLastActionByName(cfg.Actions, "new_action")
+	assert.True(t, ok)
+}
+
+func TestLoad_MergesBindingsByShadowRules(t *testing.T) {
+	cfg := &Config{
+		Bindings: []BindingConfig{
+			{Scope: "revisions", Action: "revisions.move_up", Key: StringList{"k", "up"}},
+			{Scope: "revisions", Action: "ui.open_git", Seq: StringList{"g", "g"}},
+			{Scope: "ui", Action: "ui.quit", Key: StringList{"q"}},
+		},
+	}
+
+	content := `
+[[bindings]]
+scope = "revisions"
+action = "revisions.jump_to_parent"
+key = "k"
+
+[[bindings]]
+scope = "revisions"
+action = "ui.open_oplog"
+seq = ["g", "g"]
+
+[[bindings]]
+scope = "ui"
+action = "revset.cancel"
+key = "esc"
+`
+
+	require.NoError(t, cfg.Load(content, ""))
+
+	// original bindings remain in the slice (shadowing happens at runtime)
+	assert.Contains(t, cfg.Bindings, BindingConfig{
+		Scope:  "revisions",
+		Action: "revisions.move_up",
+		Key:    StringList{"k", "up"},
+	})
+	assert.Contains(t, cfg.Bindings, BindingConfig{
+		Scope:  "revisions",
+		Action: "ui.open_git",
+		Seq:    StringList{"g", "g"},
+	})
+	// overlay bindings are appended
+	assert.Contains(t, cfg.Bindings, BindingConfig{
+		Scope:  "revisions",
+		Action: "revisions.jump_to_parent",
+		Key:    StringList{"k"},
+	})
+	assert.Contains(t, cfg.Bindings, BindingConfig{
+		Scope:  "revisions",
+		Action: "ui.open_oplog",
+		Seq:    StringList{"g", "g"},
+	})
+	assert.Contains(t, cfg.Bindings, BindingConfig{
+		Scope:  "ui",
+		Action: "ui.quit",
+		Key:    StringList{"q"},
+	})
+	assert.Contains(t, cfg.Bindings, BindingConfig{
+		Scope:  "ui",
+		Action: "revset.cancel",
+		Key:    StringList{"esc"},
+	})
+}
+
+func TestLoadDefaultConfig_SetsWindowTitleByDefault(t *testing.T) {
+	cfg := loadDefaultConfig()
+
+	assert.Equal(t, WindowTitleFull, cfg.UI.SetWindowTitle)
+}
+
+func TestLoad_UISetWindowTitleCanBeDisabled(t *testing.T) {
+	cfg := loadDefaultConfig()
+
+	require.NoError(t, cfg.Load(`
+[ui]
+set_window_title = false
+`, ""))
+
+	assert.Equal(t, WindowTitleOff, cfg.UI.SetWindowTitle)
+}
+
+func TestLoad_UISetWindowTitleStringValues(t *testing.T) {
+	tests := []struct {
+		name     string
+		value    string
+		expected WindowTitleMode
+	}{
+		{"base", "base", WindowTitleBase},
+		{"full", "full", WindowTitleFull},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cfg := loadDefaultConfig()
+
+			require.NoError(t, cfg.Load(fmt.Sprintf(`
+[ui]
+set_window_title = %q
+`, tt.value), ""))
+
+			assert.Equal(t, tt.expected, cfg.UI.SetWindowTitle)
+		})
+	}
+}
+
+func TestLoad_SeqBindingDoesNotInheritStaleKey(t *testing.T) {
+	cfg := &Config{
+		Bindings: []BindingConfig{
+			{Scope: "ui", Action: "revset.cancel", Key: StringList{"esc"}},
+		},
+	}
+
+	content := `
+[[actions]]
+name = "say hello"
+lua = "flash('hello')"
+
+[[bindings]]
+action = "say hello"
+seq = ["w", "h"]
+scope = "ui"
+`
+
+	require.NoError(t, cfg.Load(content, ""))
+
+	found := false
+	for _, b := range cfg.Bindings {
+		if b.Action != "say hello" || b.Scope != "ui" {
+			continue
+		}
+		found = true
+		assert.Empty(t, b.Key)
+		assert.Equal(t, StringList{"w", "h"}, b.Seq)
+	}
+	assert.True(t, found, "expected merged binding for action 'say hello'")
+}
+
+func TestLoadFromDir_BindingsProfileRelativeToBaseDir(t *testing.T) {
+	dir := t.TempDir()
+
+	profileContent := `
+[[bindings]]
+scope = "revisions"
+action = "revisions.move_up"
+key = "j"
+`
+	err := os.WriteFile(filepath.Join(dir, "my-profile.toml"), []byte(profileContent), 0o600)
+	require.NoError(t, err)
+
+	configContent := `bindings_profile = "my-profile.toml"`
+
+	cfg := &Config{}
+	err = cfg.Load(configContent, dir)
+	require.NoError(t, err)
+
+	assert.Contains(t, cfg.Bindings, BindingConfig{
+		Scope:  "revisions",
+		Action: "revisions.move_up",
+		Key:    StringList{"j"},
+	})
+}
+
+func TestLoadFromDir_BindingsProfileAbsPathIgnoresBaseDir(t *testing.T) {
+	dir := t.TempDir()
+
+	profileContent := `
+[[bindings]]
+scope = "revisions"
+action = "revisions.move_down"
+key = "k"
+`
+	profilePath := filepath.Join(dir, "abs-profile.toml")
+	err := os.WriteFile(profilePath, []byte(profileContent), 0o600)
+	require.NoError(t, err)
+
+	// Use an absolute path — baseDir should be irrelevant
+	configContent := `bindings_profile = "` + profilePath + `"`
+
+	cfg := &Config{}
+	err = cfg.Load(configContent, "/some/other/dir")
+	require.NoError(t, err)
+
+	assert.Contains(t, cfg.Bindings, BindingConfig{
+		Scope:  "revisions",
+		Action: "revisions.move_down",
+		Key:    StringList{"k"},
+	})
+}
+
+func TestEnvConfigDir_InvalidFallsBackToStandardConfig(t *testing.T) {
+	home := t.TempDir()
+	configHome := t.TempDir()
+	standardConfigDir := filepath.Join(configHome, "jjui")
+	require.NoError(t, os.MkdirAll(standardConfigDir, 0o700))
+	require.NoError(t, os.WriteFile(filepath.Join(standardConfigDir, "config.toml"), []byte("limit = 10\n"), 0o600))
+
+	t.Setenv("HOME", home)
+	t.Setenv("XDG_CONFIG_HOME", configHome)
+	t.Setenv("JJUI_CONFIG_DIR", filepath.Join(t.TempDir(), "missing"))
+
+	assert.Equal(t, "", EnvConfigDir())
+	assert.Equal(t, filepath.Join(standardConfigDir, "config.toml"), getConfigFilePath())
+}
+
+// TestConfigLayering verifies the precedence chain:
+// - Without JJUI_CONFIG_DIR: global config then repo-local (repo wins on conflict)
+// - With JJUI_CONFIG_DIR: env config only, both global and repo-local are skipped
+func TestConfigLayering(t *testing.T) {
+	envDir := t.TempDir()
+	repoConfigDir := t.TempDir()
+
+	// Global: sets all three fields
+	globalConfig := `
+limit = 10
+[ui]
+auto_refresh_interval = 5
+flash_message_display_seconds = 7
+`
+
+	// Repo-local: overrides limit, leaves the others
+	repoConfig := `
+limit = 99
+`
+
+	// Env: only sets auto_refresh_interval; replaces both global and repo-local
+	envConfig := `
+[ui]
+auto_refresh_interval = 30
+`
+	require.NoError(t, os.WriteFile(filepath.Join(envDir, "config.toml"), []byte(envConfig), 0o600))
+	t.Setenv("JJUI_CONFIG_DIR", envDir)
+
+	// Simulate what main.go does when JJUI_CONFIG_DIR is set:
+	// LoadConfigFile() routes through getConfigFilePath() which returns env dir,
+	// so it loads the env config. Repo-local is skipped.
+	cfg := &Config{}
+	data, err := LoadConfigFile()
+	require.NoError(t, err)
+	require.NoError(t, cfg.Load(string(data), GetConfigDir()))
+
+	// auto_refresh_interval comes from env config
+	assert.Equal(t, 30, cfg.UI.AutoRefreshInterval)
+	// global and repo values are absent — env replaced everything
+	assert.Equal(t, 0, cfg.Limit)
+	assert.Equal(t, 0, cfg.UI.FlashMessageDisplaySeconds)
+
+	// Now simulate without JJUI_CONFIG_DIR: global then repo-local
+	t.Setenv("JJUI_CONFIG_DIR", "")
+	cfg2 := &Config{}
+	require.NoError(t, cfg2.Load(globalConfig, ""))
+	require.NoError(t, cfg2.Load(repoConfig, repoConfigDir))
+
+	// flash_message_display_seconds: only in global, survives
+	assert.Equal(t, 7, cfg2.UI.FlashMessageDisplaySeconds)
+	// limit: global=10, overridden by repo=99
+	assert.Equal(t, 99, cfg2.Limit)
+	// auto_refresh_interval: only in global, survives
+	assert.Equal(t, 5, cfg2.UI.AutoRefreshInterval)
+}
+
+func TestSetupLuaTypes_WritesTypesAndLuaRC(t *testing.T) {
+	configDir := t.TempDir()
+	t.Setenv("JJUI_CONFIG_DIR", configDir)
+
+	result, err := SetupLuaTypes()
+	require.NoError(t, err)
+	require.NotNil(t, result)
+
+	assert.Equal(t, filepath.Join(configDir, "types.lua"), result.TypesPath)
+	assert.Equal(t, filepath.Join(configDir, ".luarc.json"), result.LuaRCPath)
+	assert.True(t, result.LuaRCCreated)
+
+	typesData, err := os.ReadFile(result.TypesPath)
+	require.NoError(t, err)
+	embeddedTypes, err := configFS.ReadFile("default/types.lua")
+	require.NoError(t, err)
+	assert.Equal(t, string(embeddedTypes), string(typesData))
+
+	luaRCData, err := os.ReadFile(result.LuaRCPath)
+	require.NoError(t, err)
+
+	var luaRC struct {
+		Workspace struct {
+			Library []string `json:"library"`
+		} `json:"workspace"`
+	}
+	require.NoError(t, json.Unmarshal(luaRCData, &luaRC))
+	assert.Equal(t, []string{result.TypesPath}, luaRC.Workspace.Library)
+}
+
+func TestSetupLuaTypes_PreservesExistingLuaRC(t *testing.T) {
+	configDir := t.TempDir()
+	t.Setenv("JJUI_CONFIG_DIR", configDir)
+
+	luaRCPath := filepath.Join(configDir, ".luarc.json")
+	existingLuaRC := []byte("{\"workspace\":{\"library\":[\"/tmp/custom-types.lua\"]}}\n")
+	require.NoError(t, os.WriteFile(luaRCPath, existingLuaRC, 0o644))
+
+	typesPath := filepath.Join(configDir, "types.lua")
+	require.NoError(t, os.WriteFile(typesPath, []byte("stale"), 0o644))
+
+	result, err := SetupLuaTypes()
+	require.NoError(t, err)
+	require.NotNil(t, result)
+	assert.False(t, result.LuaRCCreated)
+
+	luaRCData, err := os.ReadFile(luaRCPath)
+	require.NoError(t, err)
+	assert.Equal(t, string(existingLuaRC), string(luaRCData))
+
+	typesData, err := os.ReadFile(typesPath)
+	require.NoError(t, err)
+	embeddedTypes, err := configFS.ReadFile("default/types.lua")
+	require.NoError(t, err)
+	assert.Equal(t, string(embeddedTypes), string(typesData))
+}

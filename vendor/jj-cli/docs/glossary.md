@@ -32,13 +32,13 @@ commit if it gets [rewritten](#rewrite).
 
 ## Branch
 
-In the context of `jj`, the work "branch" usually refers to an [anonymous
+In the context of `jj`, the word "branch" usually refers to an [anonymous
 branch](#anonymous-branch) or, less formally, a branch of the commit "tree"
 (which is itself an informal way to refer to the commit graph, parts of which
 might resemble a tree even when it's not mathematically a tree).
 
 We also sometimes discuss Git's branches and branches on Git remotes. Locally,
-these correspond to [bookmarks](#bookmark). In a co-located repository, each
+these correspond to [bookmarks](#bookmark). In a colocated workspace, each
 local Git branch corresponds to a `jj` bookmark.
 
 ## Change
@@ -53,6 +53,15 @@ A change ID is a unique identifier for a [change](#change). They are typically
 16 bytes long and are often randomly generated. By default, `jj log` presents
 them as a sequence of 12 letters in the k-z range, at the beginning of a line.
 These are actually hexadecimal numbers that use "digits" z-k instead of 0-9a-f.
+
+## Change offset
+
+Sometimes a change ID might not unambiguously identify a commit, such as if the
+commit is hidden or if the change ID is [divergent](#divergent-change). In these
+cases, you can add an offset after the change ID to make it clear which commit
+you are referring to, with the most recent commit having an offset of 0. For
+instance, the most recent commit with change ID `xyz` could be referred to as
+`xyz/0`, while the one before it would be `xyz/1`, and so on.
 
 ## Commit
 
@@ -79,14 +88,14 @@ long when using the Git backend. They are presented in regular hexadecimal
 format at the end of the line in `jj log`, using 12 hexadecimal digits by
 default. When using the Git backend, the commit ID is the Git commit ID.
 
-## Co-located repos
+## <a name="colocated-repos"></a>Colocated workspaces
 
 When using the Git [backend](#backend) and the backing Git repository's `.git/`
-directory is a sibling of `.jj/`, we call the repository "co-located". Most
-tools designed for Git can be easily used on such repositories. `jj` and `git`
+directory is a sibling of `.jj/`, we call the workspace colocated. Most
+tools designed for Git can be easily used on such workspace. `jj` and `git`
 commands can be used interchangeably.
 
-See [here](git-compatibility.md#co-located-jujutsugit-repos) for details.
+See [here](git-compatibility.md#colocated-jujutsugit-repos) for details.
 
 ## Conflict
 
@@ -107,7 +116,8 @@ call that a [divergent change](#divergent-change).
 ## Divergent change
 
 A divergent change is a [change](#change) that has more than one
-[visible commit](#visible-commits).
+[visible commit](#visible-commits). These changes are displayed with a label of
+"divergent" in the log.
 
 ## Head
 
@@ -146,7 +156,13 @@ and [commits](#commit).
 
 ## Remote
 
-TODO
+A remote is a reference to a copy of your repository. The most common case is
+that the remote is hosted on the internet or another network, but local remotes
+are also possible. Remotes are useful when working on a project with multiple
+collaborators. As Jujutsu is compatible with Git you can use all popular
+providers that are also available for Git. For example
+[GitHub](https://github.com), [GitLab](https://gitlab.com) or
+[Codeberg](https://codeberg.org/).
 
 ## Revision
 
@@ -197,11 +213,11 @@ Visible commits are the commits you see in `jj log -r 'all()'`. They are the
 commits that are reachable from an anonymous head in the [view](#view).
 Ancestors of a visible commit are implicitly visible.
 
-Intuitively, visible commits are the "latest versions" of a revision with a
-given [change id](#change-id). A commit that's abandoned or
-[rewritten](#rewrite) stops being visible and is labeled as "hidden". Such
-commits are no longer accessible using a change id, but they are still
-accessible by their [commit id](#commit-id).
+Intuitively, visible commits are the "latest versions" of a given
+[change](#change). A commit that's abandoned or [rewritten](#rewrite) stops
+being visible and is labeled as "hidden". Such commits are no longer accessible
+using a change id, but they are still accessible by their
+[commit id](#commit-id).
 
 ## View
 

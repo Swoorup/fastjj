@@ -14,28 +14,47 @@
 
 use clap_complete::ArgValueCandidates;
 use itertools::Itertools as _;
+use jj_lib::operation::Operation;
 
 use super::diff::show_op_diff;
 use crate::cli_util::CommandHelper;
 use crate::cli_util::LogContentFormat;
 use crate::command_error::CommandError;
-use crate::commit_templater::CommitTemplatePropertyKind;
 use crate::complete;
-use crate::diff_util::diff_formats_for_log;
 use crate::diff_util::DiffFormatArgs;
 use crate::diff_util::DiffRenderer;
+use crate::diff_util::diff_formats_for_log;
 use crate::graphlog::GraphStyle;
+use crate::templater::TemplateRenderer;
 use crate::ui::Ui;
 
 /// Show changes to the repository in an operation
 #[derive(clap::Args, Clone, Debug)]
 pub struct OperationShowArgs {
     /// Show repository changes in this operation, compared to its parent(s)
-    #[arg(default_value = "@", add = ArgValueCandidates::new(complete::operations))]
+    #[arg(default_value = "@")]
+    #[arg(add = ArgValueCandidates::new(complete::operations))]
     operation: String,
+
     /// Don't show the graph, show a flat list of modified changes
-    #[arg(long)]
+    #[arg(long, short = 'G')]
     no_graph: bool,
+
+    /// Render the operation using the given template
+    ///
+    /// You can specify arbitrary template expressions using the
+    /// [built-in keywords]. See [`jj help -k templates`] for more
+    /// information.
+    ///
+    /// [built-in keywords]:
+    ///     https://docs.jj-vcs.dev/latest/templates/#operation-keywords
+    ///
+    /// [`jj help -k templates`]:
+    ///     https://docs.jj-vcs.dev/latest/templates/
+    #[arg(long, short = 'T')]
+    #[arg(add = ArgValueCandidates::new(complete::template_aliases))]
+    template: Option<String>,
+
     /// Show patch of modifications to changes
     ///
     /// If the previous version has different parents, it will be temporarily
@@ -43,6 +62,11 @@ pub struct OperationShowArgs {
     /// contaminated by unrelated changes.
     #[arg(long, short = 'p')]
     patch: bool,
+
+    /// Do not show operation diff
+    #[arg(long, conflicts_with_all = ["patch", "DiffFormatArgs"])]
+    no_op_diff: bool,
+
     #[command(flatten)]
     diff_format: DiffFormatArgs,
 }
@@ -57,21 +81,18 @@ pub fn cmd_op_show(
     let repo_loader = workspace_command.workspace().repo_loader();
     let settings = workspace_command.settings();
     let op = workspace_command.resolve_single_op(&args.operation)?;
-    let parents: Vec<_> = op.parents().try_collect()?;
-    let parent_op = repo_loader.merge_operations(parents, None)?;
-    let parent_repo = repo_loader.load_at(&parent_op)?;
+    let parent_ops: Vec<_> = op.parents().try_collect()?;
+    let merged_parent_op = repo_loader.merge_operations(parent_ops.clone(), None)?;
+    let parent_repo = repo_loader.load_at(&merged_parent_op)?;
     let repo = repo_loader.load_at(&op)?;
 
     let id_prefix_context = workspace_env.new_id_prefix_context();
     let commit_summary_template = {
         let language = workspace_env.commit_template_language(repo.as_ref(), &id_prefix_context);
         let text = settings.get_string("templates.commit_summary")?;
-        workspace_env.parse_template(
-            ui,
-            &language,
-            &text,
-            CommitTemplatePropertyKind::wrap_commit,
-        )?
+        workspace_env
+            .parse_template(ui, &language, &text)?
+            .labeled(["op_show", "commit"])
     };
 
     let graph_style = GraphStyle::from_settings(settings)?;
@@ -90,27 +111,37 @@ pub fn cmd_op_show(
         })
     };
 
-    // TODO: Should we make this customizable via clap arg?
-    let template = {
-        let text = settings.get_string("templates.op_log")?;
+    let template: TemplateRenderer<Operation> = {
+        let text = match &args.template {
+            Some(value) => value.to_owned(),
+            None => settings.get_string("templates.op_show")?,
+        };
         workspace_command
             .parse_operation_template(ui, &text)?
-            .labeled("operation")
+            .labeled(["op_show", "operation"])
     };
 
     ui.request_pager();
     let mut formatter = ui.stdout_formatter();
     template.format(&op, formatter.as_mut())?;
 
-    show_op_diff(
-        ui,
-        formatter.as_mut(),
-        repo.as_ref(),
-        &parent_repo,
-        &repo,
-        &commit_summary_template,
-        (!args.no_graph).then_some(graph_style),
-        &with_content_format,
-        diff_renderer.as_ref(),
-    )
+    if !args.no_op_diff {
+        // TODO: Merged repo may have newly rebased commits, which wouldn't exist in
+        // the index. (#4465)
+        if parent_ops.len() > 1 {
+            return Ok(());
+        }
+        show_op_diff(
+            ui,
+            formatter.as_mut(),
+            repo.as_ref(),
+            &parent_repo,
+            &repo,
+            &commit_summary_template,
+            (!args.no_graph).then_some(graph_style),
+            &with_content_format,
+            diff_renderer.as_ref(),
+        )?;
+    }
+    Ok(())
 }

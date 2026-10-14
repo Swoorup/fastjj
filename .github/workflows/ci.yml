@@ -21,6 +21,13 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: '3.12'
+      - uses: actions/setup-go@v6
+        with:
+          go-version: '1.27.2'
+          cache-dependency-path: vendor/jjui/go.sum
+      - name: Test private jjui integration
+        working-directory: vendor/jjui
+        run: go test ./...
       - uses: dtolnay/rust-toolchain@stable
         with:
           toolchain: 1.97.1
@@ -31,6 +38,11 @@ jobs:
       - run: cargo fmt --all --check
       - run: cargo clippy --locked --all-targets --no-deps -- -D warnings
       - run: cargo test --locked -- --nocapture
+      - name: Build fastjjui
+        working-directory: vendor/jjui
+        env:
+          CGO_ENABLED: '0'
+        run: go build -trimpath -ldflags '-s -w -X main.Version=fastjjui-0.2.0-jjui-0.10.11' -o ../../target/debug/fastjjui ./cmd/jjui
       - name: Verify native HTTPS transport and certificate trust
         run: python3 scripts/verify_https_clone.py target/debug/fastjj
       - run: python3 -m unittest discover -s tests -p 'test_*.py'
@@ -39,7 +51,9 @@ jobs:
           sudo apt-get update && sudo apt-get install -y strace openssh-server
           sudo install -d -m 0755 /run/sshd
       - name: Verify native SSH authentication, configuration, tunnels, and privacy
-        run: python3 scripts/verify_ssh.py target/debug/fastjj
+        run: python3 scripts/verify_ssh.py target/debug/fastjj --ui-binary target/debug/fastjjui
+      - name: Verify real jjui workflows and private process arguments
+        run: python3 scripts/verify_jjui.py target/debug/fastjj target/debug/fastjjui
       - if: runner.os == 'Linux'
         run: python3 scripts/verify_process_privacy.py target/debug/fastjj
 

@@ -1,0 +1,183 @@
+package config
+
+import (
+	"fmt"
+	"testing"
+	"time"
+
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+)
+
+func TestLoad_SetWindowTitle(t *testing.T) {
+	tests := []struct {
+		name     string
+		value    string
+		expected WindowTitleMode
+		wantErr  bool
+	}{
+		{"true", "true", WindowTitleFull, false},
+		{"false", "false", WindowTitleOff, false},
+		{"base", `"base"`, WindowTitleBase, false},
+		{"full", `"full"`, WindowTitleFull, false},
+		{"invalid", `"bogus"`, WindowTitleOff, true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cfg := &Config{}
+			err := cfg.Load(fmt.Sprintf(`
+[ui]
+set_window_title = %s
+`, tt.value), "")
+			if tt.wantErr {
+				assert.Error(t, err)
+			} else {
+				assert.NoError(t, err)
+				assert.Equal(t, tt.expected, cfg.UI.SetWindowTitle)
+			}
+		})
+	}
+}
+
+func TestLoad_Theme_Simple(t *testing.T) {
+	content := `
+[ui]
+theme = "my-theme"
+`
+	config := &Config{}
+	err := config.Load(content, "")
+	assert.NoError(t, err)
+	assert.Equal(t, "my-theme", config.UI.Theme.Light)
+	assert.Equal(t, "my-theme", config.UI.Theme.Dark)
+}
+
+func TestLoad_Theme_Nested(t *testing.T) {
+	content := `
+[ui.theme]
+dark = "dark-theme"
+light = "light-theme"
+`
+	config := &Config{}
+	err := config.Load(content, "")
+	assert.NoError(t, err)
+	assert.Equal(t, "dark-theme", config.UI.Theme.Dark)
+	assert.Equal(t, "light-theme", config.UI.Theme.Light)
+}
+
+func TestLoad_AutoRefreshInterval(t *testing.T) {
+	content := `
+[ui]
+auto_refresh_interval = 5000
+`
+	config := &Config{}
+	err := config.Load(content, "")
+	assert.NoError(t, err)
+	assert.Equal(t, 5000, config.UI.AutoRefreshInterval)
+}
+
+func TestLoad_BackgroundBlend(t *testing.T) {
+	content := `
+[ui]
+background_blend = 0.0
+`
+	config := &Config{}
+	err := config.Load(content, "")
+	assert.NoError(t, err)
+	if assert.NotNil(t, config.UI.BackgroundBlend.Value) {
+		assert.Zero(t, *config.UI.BackgroundBlend.Value)
+	}
+}
+
+func TestLoad_BackgroundBlendVariants(t *testing.T) {
+	content := `
+[ui.background_blend]
+light = 0.2
+dark = 0.6
+`
+	config := &Config{}
+	err := config.Load(content, "")
+	assert.NoError(t, err)
+	if assert.NotNil(t, config.UI.BackgroundBlend.Light) {
+		assert.Equal(t, 0.2, *config.UI.BackgroundBlend.Light)
+	}
+	if assert.NotNil(t, config.UI.BackgroundBlend.Dark) {
+		assert.Equal(t, 0.6, *config.UI.BackgroundBlend.Dark)
+	}
+}
+
+func TestLoad_FlashMessageDisplaySeconds(t *testing.T) {
+	content := `
+[ui]
+flash_message_display_seconds = 10
+`
+	config := &Config{}
+	err := config.Load(content, "")
+	assert.NoError(t, err)
+	assert.Equal(t, 10, config.UI.FlashMessageDisplaySeconds)
+	assert.Equal(t, 10*time.Second, GetExpiringFlashMessageTimeout(config))
+}
+
+func TestLoad_Colors_StringAndObject(t *testing.T) {
+	content := `
+[ui.colors]
+simple = "red"
+complex = { fg = "blue", bg = "white", bold = true }
+`
+	config := &Config{}
+	err := config.Load(content, "")
+	assert.NoError(t, err)
+	assert.Len(t, config.UI.Colors, 2)
+
+	assert.Equal(t, "red", config.UI.Colors["simple"].Fg)
+	assert.Equal(t, "", config.UI.Colors["simple"].Bg)
+	assert.Nil(t, config.UI.Colors["simple"].Bold)
+
+	assert.Equal(t, "blue", config.UI.Colors["complex"].Fg)
+	assert.Equal(t, "white", config.UI.Colors["complex"].Bg)
+	if assert.NotNil(t, config.UI.Colors["complex"].Bold) {
+		assert.True(t, *config.UI.Colors["complex"].Bold)
+	}
+}
+
+func TestLoad_Colors_ExplicitFalsePreserved(t *testing.T) {
+	content := `
+[ui.colors]
+unset = { fg = "red" }
+explicit_false = { fg = "blue", underline = false }
+`
+	config := &Config{}
+	err := config.Load(content, "")
+	assert.NoError(t, err)
+
+	assert.Nil(t, config.UI.Colors["unset"].Underline)
+	if assert.NotNil(t, config.UI.Colors["explicit_false"].Underline) {
+		assert.False(t, *config.UI.Colors["explicit_false"].Underline)
+	}
+}
+
+func TestLoad_BookmarkConfig(t *testing.T) {
+	content := `
+[bookmark]
+interactive_bookmark_pane = true
+`
+	config := &Config{}
+	err := config.Load(content, "")
+	require.NoError(t, err)
+	assert.True(t, config.Bookmark.InteractiveBookmarkPane)
+}
+
+func TestLoad_AskpassConfig(t *testing.T) {
+	config := &Config{}
+	err := config.Load(`
+[askpass]
+enabled = true
+`, "")
+	require.NoError(t, err)
+	assert.True(t, config.AskpassEnabled())
+}
+
+func TestDefaultAskpassEnabled(t *testing.T) {
+	if !loadDefaultConfig().AskpassEnabled() {
+		t.Fatal("askpass should be enabled by default")
+	}
+}

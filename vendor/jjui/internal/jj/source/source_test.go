@@ -1,0 +1,278 @@
+package source
+
+import (
+	"fmt"
+	"testing"
+
+	"github.com/idursun/jjui/internal/jj"
+	"github.com/stretchr/testify/assert"
+)
+
+func TestFunctionSource(t *testing.T) {
+	s := FunctionSource{}
+	items, err := s.Fetch(nil)
+	assert.NoError(t, err)
+	assert.NotEmpty(t, items)
+
+	for _, item := range items {
+		assert.Equal(t, KindFunction, item.Kind)
+		assert.NotEmpty(t, item.Name)
+		assert.NotEmpty(t, item.SignatureHelp)
+	}
+
+	// Check a known function exists
+	found := false
+	for _, item := range items {
+		if item.Name == "ancestors" {
+			found = true
+			break
+		}
+	}
+	assert.True(t, found, "expected 'ancestors' function")
+}
+
+func TestFunctionSource_GeneratesStructuredSignatures(t *testing.T) {
+	s := FunctionSource{}
+	items, err := s.Fetch(nil)
+	assert.NoError(t, err)
+
+	byName := map[string]Item{}
+	for _, item := range items {
+		byName[item.Name] = item
+	}
+
+	assert.Equal(t, "all(): All visible commits and ancestors of commits explicitly mentioned", byName["all"].SignatureHelp)
+	assert.Equal(t, "ancestors(x[, depth]): Returns the ancestors of x limited to the given depth", byName["ancestors"].SignatureHelp)
+	assert.Equal(t, "untracked_remote_bookmarks([name_pattern[, [remote=]remote_pattern]]): All untracked remote bookmark targets", byName["untracked_remote_bookmarks"].SignatureHelp)
+}
+
+func TestFunctionMap(t *testing.T) {
+	functions := FunctionMap()
+	fn, ok := functions["untracked_remote_bookmarks"]
+	assert.True(t, ok)
+	assert.Len(t, fn.Arguments, 2)
+	assert.True(t, fn.Arguments[1].Named)
+	assert.Equal(t, CompletionRemote, fn.Arguments[1].CompletionSource)
+}
+
+func TestAliasSource(t *testing.T) {
+	aliases := map[string]string{
+		"my_alias()":  "mine()",
+		"param(x, y)": "ancestors(x) & descendants(y)",
+		"simple":      "trunk()",
+	}
+	s := AliasSource{Aliases: aliases}
+	items, err := s.Fetch(nil)
+	assert.NoError(t, err)
+	assert.Len(t, items, 3)
+
+	for _, item := range items {
+		assert.Equal(t, KindAlias, item.Kind)
+		assert.NotEmpty(t, item.SignatureHelp)
+	}
+
+	names := map[string]bool{}
+	hasParameters := map[string]bool{}
+	for _, item := range items {
+		names[item.Name] = true
+		hasParameters[item.Name] = item.HasParameters
+	}
+	assert.True(t, names["my_alias"])
+	assert.True(t, names["param"])
+	assert.True(t, names["simple"])
+	assert.False(t, hasParameters["my_alias"])
+	assert.True(t, hasParameters["param"])
+	assert.False(t, hasParameters["simple"])
+}
+
+func TestHistorySource(t *testing.T) {
+	entries := []string{"trunk()", "mine()", "ancestors(@)"}
+	s := HistorySource{Entries: entries}
+	items, err := s.Fetch(nil)
+	assert.NoError(t, err)
+	assert.Len(t, items, 3)
+
+	for i, item := range items {
+		assert.Equal(t, KindHistory, item.Kind)
+		assert.Equal(t, entries[i], item.Name)
+	}
+}
+
+func TestRevisionSource(t *testing.T) {
+	entries := []string{"first-parent", "second-parent"}
+	s := RevisionSource{Entries: entries}
+	items, err := s.Fetch(nil)
+	assert.NoError(t, err)
+	assert.Len(t, items, 2)
+
+	for i, item := range items {
+		assert.Equal(t, KindRevision, item.Kind)
+		assert.Equal(t, entries[i], item.Name)
+	}
+}
+
+func TestFileSource(t *testing.T) {
+	s := FileSource{Files: []jj.FileName{jj.NewFileName("a.go"), jj.NewFileName(""), jj.NewFileName("dir/b.go")}}
+	items, err := s.Fetch(nil)
+	assert.NoError(t, err)
+	assert.Equal(t, []Item{
+		{Name: "a.go", File: jj.NewFileName("a.go"), Kind: KindFile},
+		{Name: "dir/b.go", File: jj.NewFileName("dir/b.go"), Kind: KindFile},
+	}, items)
+}
+
+func TestBookmarkSource(t *testing.T) {
+	mockRunner := func(args []string) ([]byte, error) {
+		return []byte(`main;.;true;false;false;false;abc123
+main;origin;true;true;false;false;abc123
+deleted;.;false;false;false;false;
+deleted;origin;true;true;false;false;999999
+feature;.;true;false;false;false;def456
+`), nil
+	}
+
+	s := BookmarkSource{}
+	items, err := s.Fetch(mockRunner)
+	assert.NoError(t, err)
+
+	names := make([]string, len(items))
+	for i, item := range items {
+		assert.Equal(t, KindBookmark, item.Kind)
+		names[i] = item.Name
+	}
+	assert.Contains(t, names, "main")
+	assert.Contains(t, names, "main@origin")
+	assert.Contains(t, names, "feature")
+	assert.NotContains(t, names, "deleted")
+	assert.Contains(t, names, "deleted@origin")
+}
+
+func TestSourceFetchError(t *testing.T) {
+	mockRunner := func(args []string) ([]byte, error) {
+		return nil, fmt.Errorf("command failed")
+	}
+
+	sources := []struct {
+		name   string
+		source Source
+	}{
+		{"BookmarkSource", BookmarkSource{}},
+		{"TagSource", TagSource{}},
+		{"RemoteSource", RemoteSource{}},
+	}
+
+	for _, tc := range sources {
+		t.Run(tc.name, func(t *testing.T) {
+			items, err := tc.source.Fetch(mockRunner)
+			assert.Error(t, err)
+			assert.Nil(t, items)
+		})
+	}
+}
+
+func TestTagSource(t *testing.T) {
+	mockRunner := func(args []string) ([]byte, error) {
+		return []byte("v1.0.0\nv1.1.0\nv2.0.0\n"), nil
+	}
+
+	s := TagSource{}
+	items, err := s.Fetch(mockRunner)
+	assert.NoError(t, err)
+	assert.Len(t, items, 3)
+
+	for _, item := range items {
+		assert.Equal(t, KindTag, item.Kind)
+	}
+	assert.Equal(t, "v1.0.0", items[0].Name)
+	assert.Equal(t, "v1.1.0", items[1].Name)
+	assert.Equal(t, "v2.0.0", items[2].Name)
+}
+
+func TestRemoteSource(t *testing.T) {
+	mockRunner := func(args []string) ([]byte, error) {
+		return []byte("origin https://example.com/repo.git\nupstream https://example.com/upstream.git\n"), nil
+	}
+
+	s := RemoteSource{}
+	items, err := s.Fetch(mockRunner)
+	assert.NoError(t, err)
+	assert.Equal(t, []Item{
+		{Name: "origin", Kind: KindRemote},
+		{Name: "upstream", Kind: KindRemote},
+	}, items)
+}
+
+func TestParseTagListOutput(t *testing.T) {
+	tests := []struct {
+		input    string
+		expected []string
+	}{
+		{"v1.0.0\nv1.1.0\n", []string{"v1.0.0", "v1.1.0"}},
+		{"  v1.0.0  \n\n  v2.0.0  \n", []string{"v1.0.0", "v2.0.0"}},
+		{"", nil},
+		{"\n\n\n", nil},
+		{"single-tag", []string{"single-tag"}},
+	}
+
+	for _, test := range tests {
+		t.Run(test.input, func(t *testing.T) {
+			result := ParseTagListOutput(test.input)
+			assert.Equal(t, test.expected, result)
+		})
+	}
+}
+
+func TestFetchAll(t *testing.T) {
+	items := FetchAll(nil, FunctionSource{}, HistorySource{Entries: []string{"test"}})
+	assert.NotEmpty(t, items)
+
+	// Last item should be the history entry
+	last := items[len(items)-1]
+	assert.Equal(t, "test", last.Name)
+	assert.Equal(t, KindHistory, last.Kind)
+}
+
+func TestFetchAllSkipsFailures(t *testing.T) {
+	failRunner := func(args []string) ([]byte, error) {
+		return nil, fmt.Errorf("fail")
+	}
+
+	// BookmarkSource and TagSource will fail, but FunctionSource and HistorySource should succeed
+	items := FetchAll(failRunner,
+		FunctionSource{},
+		BookmarkSource{},
+		TagSource{},
+		HistorySource{Entries: []string{"test"}},
+	)
+
+	// Should have functions + history, but no bookmarks or tags
+	hasFunction := false
+	hasHistory := false
+	hasBookmark := false
+	hasTag := false
+	for _, item := range items {
+		switch item.Kind {
+		case KindFunction:
+			hasFunction = true
+		case KindHistory:
+			hasHistory = true
+		case KindBookmark:
+			hasBookmark = true
+		case KindTag:
+			hasTag = true
+		}
+	}
+	assert.True(t, hasFunction)
+	assert.True(t, hasHistory)
+	assert.False(t, hasBookmark)
+	assert.False(t, hasTag)
+}
+
+func TestBaseFunctions(t *testing.T) {
+	fns := BaseFunctions()
+	assert.NotEmpty(t, fns)
+	// Verify it's a copy
+	fns[0].Name = "modified"
+	original := BaseFunctions()
+	assert.NotEqual(t, "modified", original[0].Name)
+}

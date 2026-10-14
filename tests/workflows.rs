@@ -17,7 +17,7 @@ impl Fixture {
     fn new() -> Self {
         let root = TempDir::new().unwrap();
         let config = root.path().join("config.toml");
-        fs::write(&config, "[user]\nname = 'Privacy Test'\nemail = 'test@example.invalid'\n[ui]\ncolor = 'never'\npaginate = 'never'\n").unwrap();
+        fs::write(&config, "[user]\nname = 'Privacy Test'\nemail = 'test@example.invalid'\n[ui]\ncolor = 'never'\npaginate = 'never'\n[git]\ncolocate = false\n").unwrap();
         Self { root, config }
     }
 
@@ -149,6 +149,114 @@ fn private_stdin_init_and_status_keep_argv_clean() {
 }
 
 #[test]
+fn private_descriptor_preserves_stdin_and_hides_arguments() {
+    use std::os::fd::AsRawFd;
+    use std::os::unix::net::UnixStream;
+    use std::os::unix::process::CommandExt;
+    let f = Fixture::new();
+    let repo = f.init("REPOSITORY_CANARY");
+    let (reader, mut writer) = UnixStream::pair().unwrap();
+    let fd = reader.as_raw_fd();
+    let mut command = f.command(f.root.path());
+    command
+        .arg("--request-fd")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    // SAFETY: only async-signal-safe descriptor operations run after fork.
+    unsafe {
+        command.pre_exec(move || {
+            if libc::dup2(fd, 3) < 0 || libc::fcntl(3, libc::F_SETFD, 0) < 0 {
+                return Err(std::io::Error::last_os_error());
+            }
+            Ok(())
+        });
+    }
+    let mut child = command.spawn().unwrap();
+    drop(reader);
+    let observed = Command::new("ps")
+        .args(["-ww", "-p", &child.id().to_string(), "-o", "args="])
+        .output()
+        .unwrap();
+    let argv = String::from_utf8_lossy(&observed.stdout);
+    assert!(argv.contains("--request-fd"), "{argv}");
+    assert!(!argv.contains("CANARY"));
+    writer
+        .write_all(&serde_json::to_vec(&json!({"args":["describe","--stdin"],"cwd":repo})).unwrap())
+        .unwrap();
+    drop(writer);
+    child
+        .stdin
+        .take()
+        .unwrap()
+        .write_all("MESSAGE_CANARY λ\nsecond line\n".as_bytes())
+        .unwrap();
+    success(child.wait_with_output().unwrap());
+    assert_eq!(
+        f.run(
+            &repo,
+            &["log", "--no-graph", "-r", "@", "-T", "description"]
+        ),
+        "MESSAGE_CANARY λ\nsecond line\n"
+    );
+}
+
+#[test]
+fn fetch_exclusions_pruning_and_stale_push_leases() {
+    let f = Fixture::new();
+    let origin = f.init("origin");
+    fs::write(origin.join("file"), "initial").unwrap();
+    f.run(&origin, &["describe", "-m", "initial"]);
+    for name in ["main", "keep", "remove"] {
+        f.run(&origin, &["bookmark", "create", name]);
+    }
+    f.run(&origin, &["new"]);
+    f.run(&origin, &["git", "export"]);
+    let git_dir = origin.join(".jj/repo/store/git");
+    fs::write(git_dir.join("HEAD"), "ref: refs/heads/main\n").unwrap();
+    let clone = f.path("clone");
+    f.run(
+        f.root.path(),
+        &[
+            "git",
+            "clone",
+            git_dir.to_str().unwrap(),
+            clone.to_str().unwrap(),
+        ],
+    );
+    let remote = git2::Repository::open_bare(&git_dir).unwrap();
+    remote
+        .find_reference("refs/heads/keep")
+        .unwrap()
+        .delete()
+        .unwrap();
+    remote
+        .find_reference("refs/heads/remove")
+        .unwrap()
+        .delete()
+        .unwrap();
+    f.run(&clone, &["git", "fetch", "--branch", "glob:* ~ exact:keep"]);
+    let local = git2::Repository::open_bare(clone.join(".jj/repo/store/git")).unwrap();
+    assert!(local.find_reference("refs/remotes/origin/keep").is_ok());
+    assert!(local.find_reference("refs/remotes/origin/remove").is_err());
+    f.run(&clone, &["git", "fetch", "--branch", "exact:keep"]);
+    assert!(local.find_reference("refs/remotes/origin/keep").is_err());
+    // Advance the server without fetching, then try to push a different child.
+    fs::write(origin.join("file"), "server update").unwrap();
+    f.run(&origin, &["describe", "-m", "server update"]);
+    f.run(&origin, &["bookmark", "set", "main"]);
+    f.run(&origin, &["git", "export"]);
+    let server_oid = remote.refname_to_id("refs/heads/main").unwrap();
+    fs::write(clone.join("file"), "client update").unwrap();
+    f.run(&clone, &["describe", "-m", "client update"]);
+    f.run(&clone, &["bookmark", "set", "main"]);
+    let output = f.output(&clone, &["git", "push", "--bookmark", "main"]);
+    assert!(!output.status.success(), "{}", text(&output));
+    assert!(text(&output).contains("changed"), "{}", text(&output));
+    assert_eq!(remote.refname_to_id("refs/heads/main").unwrap(), server_oid);
+}
+
+#[test]
 fn git_clone_fetch_push_are_in_process() {
     let f = Fixture::new();
     let origin = f.init("secret-origin");
@@ -201,10 +309,9 @@ fn config_cannot_enable_subprocess_transport_or_pagers() {
     let f = Fixture::new();
     let repo = f.init("config-test");
     for (key, attempt, expected) in [
-        ("git.subprocess", "true", "false"),
         ("ui.pager", "malicious-pager", ":builtin"),
         ("ui.editor", "external-editor", ":builtin"),
-        ("core.fsmonitor", "watchman", "none"),
+        ("fsmonitor.backend", "watchman", "none"),
         ("ui.diff-editor", "external-diff", ":builtin"),
         ("ui.merge-editor", "external-merge", ":builtin"),
     ] {
@@ -332,7 +439,10 @@ fn malformed_requests_fail_without_echoing_private_input() {
 fn help_version_and_privacy_status() {
     let f = Fixture::new();
     assert!(f.run(f.root.path(), &["--help"]).contains("fastjj"));
-    assert!(f.run(f.root.path(), &["--version"]).contains("0.1.0"));
+    assert!(
+        f.run(f.root.path(), &["--version"])
+            .contains(env!("CARGO_PKG_VERSION"))
+    );
     assert!(
         f.run(f.root.path(), &["privacy"])
             .contains("Child processes and exec: denied")

@@ -124,13 +124,15 @@ def private_command(binary, environment, cwd, args, root, password=None, expecte
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("binary", type=Path)
+    parser.add_argument("--ui-binary", type=Path)
     args = parser.parse_args()
     binary = args.binary.resolve()
+    args_ui = args.ui_binary.resolve() if args.ui_binary else None
     sshd = shutil.which("sshd") or "/usr/sbin/sshd"
     with tempfile.TemporaryDirectory(prefix="fastjj-ssh-") as directory:
         root = Path(directory)
         config = root / "jj.toml"
-        config.write_text("[user]\nname='SSH Test'\nemail='test@example.invalid'\n[ui]\npaginate='never'\ncolor='never'\n")
+        config.write_text("[git]\ncolocate=false\n[user]\nname='SSH Test'\nemail='test@example.invalid'\n[ui]\npaginate='never'\ncolor='never'\n")
         environment = os.environ.copy()
         environment.update(JJ_CONFIG=str(config), RAYON_NUM_THREADS="2", GIT_CONFIG_NOSYSTEM="1")
         for name in ["SSH_AUTH_SOCK", "SSH_AGENT_PID", "JJ_CONFIG_TOML", "COMPLETE"]:
@@ -274,7 +276,13 @@ Host *
                 (clone / "change.txt").write_text(f"update-{index}\n")
                 jj(clone, ["describe", "-m", f"push-{index}"])
                 jj(clone, ["bookmark", "set", "main"])
-                jj(clone, ["git", "push", "--bookmark", "main"], interactive=True)
+                if args_ui is not None and name == "encrypted":
+                    from verify_jjui import git_ui
+                    desired = jj(clone, ["log", "--no-graph", "-r", "main", "-T", "commit_id"]).strip()
+                    git_ui(args_ui, binary, environment, root, clone, password, "", action="p",
+                           check=lambda: checked(["git", "--git-dir", str(store), "rev-parse", "main"]).stdout.strip() == desired)
+                else:
+                    jj(clone, ["git", "push", "--bookmark", "main"], interactive=True)
                 # An independent server-side Git read verifies what was pushed.
                 assert checked(["git", "--git-dir", str(store), "show", "main:change.txt"]).stdout == f"update-{index}\n"
                 # Advance the fixture's remote without disturbing a jj workspace.
@@ -284,7 +292,13 @@ Host *
                 commit_environment.update(GIT_AUTHOR_NAME="Test", GIT_AUTHOR_EMAIL="test@example.invalid", GIT_COMMITTER_NAME="Test", GIT_COMMITTER_EMAIL="test@example.invalid")
                 commit = checked(["git", "--git-dir", str(store), "commit-tree", tree, "-p", parent], input=f"fetch-{index}\n", env=commit_environment).stdout.strip()
                 checked(["git", "--git-dir", str(store), "update-ref", "refs/heads/main", commit])
-                jj(clone, ["git", "fetch"], interactive=True)
+                if args_ui is not None and name == "encrypted":
+                    from verify_jjui import git_ui
+                    git_ui(args_ui, binary, environment, root, clone, password, f"fetch-{index}", cancel=True)
+                    assert f"fetch-{index}" not in jj(clone, ["log", "-r", "main@origin", "-T", "description"])
+                    git_ui(args_ui, binary, environment, root, clone, password, f"fetch-{index}")
+                else:
+                    jj(clone, ["git", "fetch"], interactive=True)
                 assert f"fetch-{index}" in jj(clone, ["log", "-r", "main@origin", "-T", "description"])
                 print(f"SSH clone/fetch/push verified: {name}{' with native two-hop ProxyJump' if jumps else ''}", flush=True)
 

@@ -13,23 +13,22 @@
 // limitations under the License.
 
 use std::collections::HashMap;
-use std::collections::HashSet;
 use std::io::Write as _;
 
 use clap_complete::ArgValueCompleter;
+use indexmap::IndexSet;
 use itertools::Itertools as _;
-use jj_lib::backend::CommitId;
-use jj_lib::commit::CommitIteratorExt as _;
-use jj_lib::object_id::ObjectId as _;
 use jj_lib::refs::diff_named_ref_targets;
 use jj_lib::repo::Repo as _;
+use jj_lib::revset::RevsetExpression;
 use jj_lib::rewrite::RewriteRefsOptions;
 use tracing::instrument;
 
-use crate::cli_util::has_tracked_remote_bookmarks;
-use crate::cli_util::print_updated_commits;
 use crate::cli_util::CommandHelper;
 use crate::cli_util::RevisionArg;
+#[cfg(feature = "git")]
+use crate::cli_util::has_tracked_remote_bookmarks;
+use crate::cli_util::print_updated_commits;
 use crate::command_error::CommandError;
 use crate::complete;
 use crate::ui::Ui;
@@ -44,27 +43,21 @@ use crate::ui::Ui;
 /// commit. This is true in general; it is not specific to this command.
 #[derive(clap::Args, Clone, Debug)]
 pub(crate) struct AbandonArgs {
-    /// The revision(s) to abandon (default: @)
-    #[arg(
-        value_name = "REVSETS",
-        add = ArgValueCompleter::new(complete::revset_expression_mutable),
-    )]
+    /// The revision(s) to abandon (default: @) [aliases: -r]
+    #[arg(value_name = "REVSETS")]
+    #[arg(add = ArgValueCompleter::new(complete::revset_expression_mutable))]
     revisions_pos: Vec<RevisionArg>,
-    #[arg(
-        short = 'r',
-        hide = true,
-        value_name = "REVSETS",
-        add = ArgValueCompleter::new(complete::revset_expression_mutable),
-    )]
+
+    #[arg(short = 'r', hide = true, value_name = "REVSETS")]
+    #[arg(add = ArgValueCompleter::new(complete::revset_expression_mutable))]
     revisions_opt: Vec<RevisionArg>,
-    // TODO: Remove in jj 0.34+
-    #[arg(long, short, hide = true)]
-    summary: bool,
+
     /// Do not delete bookmarks pointing to the revisions to abandon
     ///
     /// Bookmarks will be moved to the parent revisions instead.
     #[arg(long)]
     retain_bookmarks: bool,
+
     /// Do not modify the content of the children of the abandoned commits
     #[arg(long)]
     restore_descendants: bool,
@@ -76,24 +69,39 @@ pub(crate) fn cmd_abandon(
     command: &CommandHelper,
     args: &AbandonArgs,
 ) -> Result<(), CommandError> {
-    if args.summary {
-        writeln!(ui.warning_default(), "--summary is no longer supported.")?;
-    }
     let mut workspace_command = command.workspace_helper(ui)?;
-    let to_abandon: Vec<_> = if !args.revisions_pos.is_empty() || !args.revisions_opt.is_empty() {
-        workspace_command
-            .parse_union_revsets(ui, &[&*args.revisions_pos, &*args.revisions_opt].concat())?
-    } else {
-        workspace_command.parse_revset(ui, &RevisionArg::AT)?
-    }
-    .evaluate_to_commits()?
-    .try_collect()?;
+    let to_abandon = {
+        let target_expr = if !args.revisions_pos.is_empty() || !args.revisions_opt.is_empty() {
+            workspace_command
+                .parse_union_revsets(ui, &[&*args.revisions_pos, &*args.revisions_opt].concat())?
+        } else {
+            workspace_command.parse_revset(ui, &RevisionArg::AT)?
+        }
+        .resolve()?;
+        let visible_expr = target_expr.intersection(&RevsetExpression::visible_heads().ancestors());
+        workspace_command.check_rewritable_expr(&visible_expr)?;
+        let visible: IndexSet<_> = visible_expr
+            .evaluate(workspace_command.repo().as_ref())?
+            .iter()
+            .try_collect()?;
+
+        let targets: Vec<_> = target_expr
+            .evaluate(workspace_command.repo().as_ref())?
+            .iter()
+            .try_collect()?;
+        if visible.len() < targets.len() {
+            writeln!(
+                ui.status(),
+                "Skipping {n} revisions that are already hidden.",
+                n = targets.len() - visible.len()
+            )?;
+        }
+        visible
+    };
     if to_abandon.is_empty() {
         writeln!(ui.status(), "No revisions to abandon.")?;
         return Ok(());
     }
-    let to_abandon_set: HashSet<&CommitId> = to_abandon.iter().ids().collect();
-    workspace_command.check_rewritable(to_abandon_set.iter().copied())?;
 
     let mut tx = workspace_command.start_transaction();
     let options = RewriteRefsOptions {
@@ -101,17 +109,17 @@ pub(crate) fn cmd_abandon(
     };
     let mut num_rebased = 0;
     tx.repo_mut().transform_descendants_with_options(
-        to_abandon_set.iter().copied().cloned().collect(),
+        to_abandon.iter().cloned().collect(),
         &HashMap::new(),
         &options,
-        |rewriter| {
-            if to_abandon_set.contains(rewriter.old_commit().id()) {
+        async |rewriter| {
+            if to_abandon.contains(rewriter.old_commit().id()) {
                 rewriter.abandon();
             } else if args.restore_descendants {
                 rewriter.reparent().write()?;
                 num_rebased += 1;
             } else {
-                rewriter.rebase()?.write()?;
+                rewriter.rebase().await?.write()?;
                 num_rebased += 1;
             }
             Ok(())
@@ -128,10 +136,14 @@ pub(crate) fn cmd_abandon(
 
     if let Some(mut formatter) = ui.status_formatter() {
         writeln!(formatter, "Abandoned {} commits:", to_abandon.len())?;
+        let abandoned_commits: Vec<_> = to_abandon
+            .iter()
+            .map(|id| tx.base_repo().store().get_commit(id))
+            .try_collect()?;
         print_updated_commits(
             formatter.as_mut(),
             &tx.base_workspace_helper().commit_summary_template(),
-            &to_abandon,
+            &abandoned_commits,
         )?;
         if !deleted_bookmarks.is_empty() {
             writeln!(
@@ -155,12 +167,13 @@ pub(crate) fn cmd_abandon(
             }
         }
     }
+
     let transaction_description = if to_abandon.len() == 1 {
-        format!("abandon commit {}", to_abandon[0].id().hex())
+        format!("abandon commit {}", to_abandon[0])
     } else {
         format!(
             "abandon commit {} and {} more",
-            to_abandon[0].id().hex(),
+            to_abandon[0],
             to_abandon.len() - 1
         )
     };
@@ -168,10 +181,10 @@ pub(crate) fn cmd_abandon(
 
     #[cfg(feature = "git")]
     if jj_lib::git::get_git_backend(workspace_command.repo().store()).is_ok() {
-        let view = workspace_command.repo().view();
+        let repo = workspace_command.repo().as_ref();
         if deleted_bookmarks
             .iter()
-            .any(|name| has_tracked_remote_bookmarks(view, name))
+            .any(|name| has_tracked_remote_bookmarks(repo, name))
         {
             writeln!(
                 ui.hint_default(),

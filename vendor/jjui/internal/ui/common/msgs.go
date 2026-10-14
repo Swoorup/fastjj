@@ -1,0 +1,209 @@
+package common
+
+import (
+	tea "charm.land/bubbletea/v2"
+	"github.com/charmbracelet/x/ansi"
+	"github.com/idursun/jjui/internal/jj"
+	"github.com/idursun/jjui/internal/jj/source"
+)
+
+type (
+	CloseViewMsg struct {
+		Applied bool
+	}
+	AutoRefreshMsg  struct{}
+	ThemeChangedMsg struct{}
+	RefreshMsg      struct {
+		SelectedRevision string
+		KeepSelections   bool
+	}
+	UpdateRevisionsFailedMsg struct {
+		Output string
+		Err    error
+	}
+	UpdateRevisionsSuccessMsg struct{}
+	UpdateBookmarksMsg        struct {
+		Bookmarks []string
+		Revision  string
+	}
+	CommandRunningMsg struct {
+		ID      int
+		Command string
+	}
+	CommandCompletedMsg struct {
+		ID     int
+		Output string
+		Err    error
+	}
+	SelectionChangedMsg struct {
+		Item SelectedItem
+	}
+	QuickSearchMsg  string
+	UpdateRevSetMsg string
+	ExecMsg         struct {
+		Line string
+		Mode ExecMode
+	}
+	ShowChooseMsg struct {
+		Options []string
+		Title   string
+		Ordered bool
+	}
+	ShowInputMsg struct {
+		Title  string
+		Prompt string
+		Value  string
+	}
+	ExecProcessCompletedMsg struct {
+		Err error
+		Msg ExecMsg
+	}
+	FileSearchMsg struct {
+		Revset           string
+		Commit           *jj.Commit
+		RawFileOut       []byte // raw output from `jj file list`
+		RepoRoot         string
+		WorkingDirectory string
+	}
+	ShowPreview     struct{}
+	RunLuaScriptMsg struct {
+		Script       string
+		CompletionID string
+	}
+	DispatchActionMsg struct {
+		Action       string
+		Args         map[string]any
+		BuiltIn      bool
+		CompletionID string
+	}
+	ActionCompletedMsg struct {
+		ID string
+	}
+	TogglePasswordMsg struct {
+		ID           uint64
+		Prompt       string
+		Password     chan []byte
+		EchoPassword bool
+	}
+	RestoreOperationMsg struct {
+		Operation any
+	}
+	StartAceJumpMsg     struct{}
+	OpenTargetPickerMsg struct {
+		Payload any // additional information to carry with the target picker
+		Sources []source.Source
+	}
+)
+
+type State int
+
+const (
+	Loading State = iota
+	Ready
+)
+
+func Close() tea.Msg {
+	return CloseViewMsg{}
+}
+
+func Quit() tea.Cmd {
+	// bubbletea does not automatically reset the mode 2031 subscription since we
+	// enable that ourselves. Reset it explicitly so color change notifications
+	// aren't still emitted to the terminal after jjui exits.
+	return tea.Sequence(tea.Raw(ansi.ResetModeLightDark), tea.Quit)
+}
+
+func Suspend() tea.Cmd {
+	// disable mode 2031 push notifications before suspending
+	return tea.Sequence(tea.Raw(ansi.ResetModeLightDark), tea.Suspend)
+}
+
+func CloseApplied() tea.Msg {
+	return CloseViewMsg{Applied: true}
+}
+
+func RestoreOperation(op any) tea.Cmd {
+	return func() tea.Msg {
+		return RestoreOperationMsg{Operation: op}
+	}
+}
+
+func StartAceJump() tea.Cmd {
+	return func() tea.Msg {
+		return StartAceJumpMsg{}
+	}
+}
+
+func OpenTargetPicker(sources ...source.Source) tea.Cmd {
+	return func() tea.Msg {
+		return OpenTargetPickerMsg{Sources: sources}
+	}
+}
+
+func OpenTargetPickerWithPayload(payload any, sources ...source.Source) tea.Cmd {
+	return func() tea.Msg {
+		return OpenTargetPickerMsg{Payload: payload, Sources: sources}
+	}
+}
+
+func SelectionChanged(item SelectedItem) tea.Cmd {
+	return func() tea.Msg {
+		return SelectionChangedMsg{Item: item}
+	}
+}
+
+func RefreshAndSelect(selectedRevision string) tea.Cmd {
+	return func() tea.Msg {
+		return RefreshMsg{SelectedRevision: selectedRevision}
+	}
+}
+
+func RefreshAndKeepSelections() tea.Msg {
+	return RefreshMsg{KeepSelections: true}
+}
+
+func Refresh() tea.Msg {
+	return RefreshMsg{}
+}
+
+func UpdateRevSet(revset string) tea.Cmd {
+	return func() tea.Msg {
+		return UpdateRevSetMsg(revset)
+	}
+}
+
+func FileSearch(revset string, commit *jj.Commit, rawFileOut []byte, repoRoot, workingDirectory string) tea.Cmd {
+	return func() tea.Msg {
+		return FileSearchMsg{
+			Commit:           commit,
+			RawFileOut:       rawFileOut,
+			Revset:           revset,
+			RepoRoot:         repoRoot,
+			WorkingDirectory: workingDirectory,
+		}
+	}
+}
+
+type ExecMode struct {
+	Mode   string
+	Prompt string
+}
+
+var ExecJJ ExecMode = ExecMode{
+	Mode:   "jj",
+	Prompt: ": ",
+}
+
+var ExecShell ExecMode = ExecMode{
+	Mode:   "sh",
+	Prompt: "$ ",
+}
+
+func IsInputMessage(msg tea.Msg) bool {
+	switch msg.(type) {
+	case tea.KeyMsg, tea.MouseMsg:
+		return true
+	default:
+		return false
+	}
+}

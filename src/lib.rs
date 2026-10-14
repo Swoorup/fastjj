@@ -2,5 +2,6 @@
 
 pub mod editor;
 pub mod privacy;
+pub mod prompt;
 pub mod request;
 pub mod ssh;

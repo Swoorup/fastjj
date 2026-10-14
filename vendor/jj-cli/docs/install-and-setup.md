@@ -1,6 +1,5 @@
 # Installation and setup
 
-
 ## Installation
 
 ### Download pre-built binaries for a release
@@ -30,12 +29,11 @@ be compiled from the same source code.
 
 #### From Source
 
-First make sure that you have a Rust version >= 1.84 and that the `libssl-dev`,
-`openssl`, `pkg-config`, and `build-essential` packages are installed by running
-something like this:
+First make sure that you have a Rust version >= 1.88 and that the
+`build-essential` package is installed by running something like this:
 
 ```shell
-sudo apt-get install libssl-dev openssl pkg-config build-essential
+sudo apt-get install build-essential
 ```
 
 Now run either:
@@ -115,9 +113,9 @@ zypper install jujutsu
 
 ### Mac
 
-#### From Source, Vendored OpenSSL
+#### From Source
 
-First make sure that you have a Rust version >= 1.84. You may also need to run:
+First make sure that you have a Rust version >= 1.88. You may also need to run:
 
 ```shell
 xcode-select --install
@@ -128,34 +126,7 @@ Now run either:
 ```shell
 # To install the *prerelease* version from the main branch
 cargo install --git https://github.com/jj-vcs/jj.git \
-     --features vendored-openssl --locked --bin jj jj-cli
-```
-
-or:
-
-```shell
-# To install the latest release
-cargo install --features vendored-openssl --locked --bin jj jj-cli
-```
-
-#### From Source, Homebrew OpenSSL
-
-First make sure that you have a Rust version >= 1.84. You will also need
-[Homebrew] installed. You may then need to run some or all of
-these:
-
-```shell
-xcode-select --install
-brew install openssl
-brew install pkg-config
-export PKG_CONFIG_PATH="$(brew --prefix)/opt/openssl@3/lib/pkgconfig"
-```
-
-Now run either:
-
-```shell
-# To install the *prerelease* version from the main branch
-cargo install --git https://github.com/jj-vcs/jj.git --locked --bin jj jj-cli
+     --locked --bin jj jj-cli
 ```
 
 or:
@@ -164,7 +135,6 @@ or:
 # To install the latest release
 cargo install --locked --bin jj jj-cli
 ```
-
 
 #### Homebrew
 
@@ -187,20 +157,33 @@ sudo port install jujutsu
 
 ### Windows
 
-First make sure that you have a Rust version >= 1.84. Now run either:
+First make sure that you have a Rust version >= 1.88. Now run either:
 
 ```shell
 # To install the *prerelease* version from the main branch
-cargo install --git https://github.com/jj-vcs/jj.git --locked --bin jj jj-cli --features vendored-openssl
+cargo install --git https://github.com/jj-vcs/jj.git --locked --bin jj jj-cli
 ```
 
 or:
 
 ```shell
 # To install the latest release
-cargo install --locked --bin jj jj-cli --features vendored-openssl
+cargo install --locked --bin jj jj-cli
 ```
 
+via winget:
+
+```shell
+# To install the latest release via winget
+winget install jj-vcs.jj
+```
+
+via scoop:
+
+```shell
+# To install the latest release via scoop
+scoop install main/jj
+```
 
 ## Initial configuration
 
@@ -213,104 +196,124 @@ $ jj config set --user user.email "martinvonz@google.com"
 
 ## Command-line completion
 
-To set up command-line completion, source the output of
-`jj util completion bash/zsh/fish`. Exactly how to source it
-depends on your shell.
+Jujutsu provides 2 different command-line completion scripts.
 
-Improved completions are also available. They will complete things like
-bookmarks, aliases, revisions, operations and files. They can be context aware,
-for example they respect the global flags `--repository` and `--at-operation` as
-well as some command-specific ones like `--revision`, `--from` and `--to`. You
-can activate them with the alternative "dynamic" instructions below. They should
-still complete everything the static completions did, so only activate one of
-them. Please let us know if you encounter any issues, so we can ensure a smooth
-transition once we default to these new completions.
+### Standard completions
 
-!!! info "Why are the improved completions not the default?"
+The standard completion script provides completions for `jj` subcommands and
+options.
 
-    To generate the dynamic completion script, execute `jj` with `$COMPLETE` set
-    to the name of your shell (see examples below). See the upstream clap issue
-    [#3166][clap] for the explanation.
+### Dynamic completions
 
+The dynamic completion script provides completions for `jj` subcommands and
+options, as well as additional completions, including bookmarks,
+aliases, revisions, operations and files. Dynamic completions can be context
+aware, for example they respect the global flags `--repository` and
+`--at-operation` as well as some command-specific ones like `--revision`,
+`--from`, and `--to`.
+
+Dynamic completions are not the default/only option since the underlying engine
+[is still labeled unstable][clap]. We expect to transition to them as the
+default once the engine is stabilized. Please let us know if you encounter any
+issues with dynamic completions.
+
+!!! info "Which completion script should I use?"
+
+    Generally, dynamic completions provide a much better completion experience.
+    Although the underlying engine is deemed unstable, there have not been many
+    issues in practice. Dynamic completions are the preferred option for many
+    contributors and users.
+
+    We recommend using the dynamic completion script, and falling back to the
+    standard completion script if there are any issues.
+
+<!-- The content tabs formatting below is optimized for the website and not for GitHub. -->
 
 ### Bash
 
-#### Standard
+=== "Standard"
 
-```shell
-source <(jj util completion bash)
-```
+    ```shell
+    source <(jj util completion bash)
+    ```
 
-#### Dynamic
+=== "Dynamic"
 
-```shell
-source <(COMPLETE=bash jj)
-```
+    ```shell
+    source <(COMPLETE=bash jj)
+    ```
 
 ### Zsh
 
-#### Standard
+=== "Standard"
 
-```shell
-autoload -U compinit
-compinit
-source <(jj util completion zsh)
-```
+    ```shell
+    autoload -U compinit
+    compinit
+    source <(jj util completion zsh)
+    ```
 
-#### Dynamic
+=== "Dynamic"
 
-```shell
-source <(COMPLETE=zsh jj)
-```
+    ```shell
+    source <(COMPLETE=zsh jj)
+    ```
 
 ### Fish
 
-!!! note
+=== "Standard"
 
-    No configuration is required with fish >= 4.1 which loads dynamic completions by default.
+    ```shell
+    jj util completion fish | source
+    ```
 
-#### Standard
+=== "Dynamic"
 
-```shell
-jj util completion fish | source
-```
+    !!! note
 
-#### Dynamic
+        No configuration is required with fish >= 4.0.2 which loads dynamic completions by default.
 
-```shell
-COMPLETE=fish jj | source
-```
+    ```shell
+    COMPLETE=fish jj | source
+    ```
 
 ### Nushell
 
-```nu
-jj util completion nushell | save completions-jj.nu
-use completions-jj.nu *  # Or `source completions-jj.nu`
-```
+=== "Standard"
 
-(dynamic completions not available yet)
-
-### Xonsh
-
-```shell
-source-bash $(jj util completion)
-```
-
-(dynamic completions not available yet)
+    ```nu
+    jj util completion nushell | save -f completions-jj.nu
+    use completions-jj.nu *  # Or `source completions-jj.nu`
+    ```
 
 ### Powershell
 
-Insert this line in your $PROFILE file:
-(usually $HOME\Documents\PowerShell\Microsoft.PowerShell_profile.ps1)
+=== "Standard"
 
-```shell
-Invoke-Expression (& { (jj util completion power-shell | Out-String) })
-```
+    ```powershell
+    jj util completion power-shell | Out-String | Invoke-Expression
+    ```
 
-(dynamic completions not available yet)
+=== "Dynamic"
+
+    ```powershell
+    $env:COMPLETE = "powershell"
+    jj | Out-String | Invoke-Expression
+    Remove-Item Env:\COMPLETE
+    ```
+
+Insert the above into your `$PROFILE` file
+(usually `$HOME\Documents\PowerShell\Microsoft.PowerShell_profile.ps1`).
+
+!!! note
+
+    Note that to execute scripts in PowerShell on Windows, including `$PROFILE`,
+    the [execution policy][ExecutionPolicies] needs to be set to `RemoteSigned`
+    at minimum.
 
 [cargo-binstall]: https://github.com/cargo-bins/cargo-binstall
 [clap]: https://github.com/clap-rs/clap/issues/3166
 [Homebrew]: https://brew.sh/
 [macports]: https://ports.macports.org/port/jujutsu/
 [pre-built binaries]: https://github.com/jj-vcs/jj/releases/latest
+[ExecutionPolicies]: https://learn.microsoft.com/en-us/powershell/module/microsoft.powershell.core/about/about_execution_policies

@@ -1,9 +1,12 @@
 # The code assumes that this table exists, so don't delete it even if you remove
 # all aliases from here.
 [aliases]
-amend = ["squash"]
+# The aliases here should be kept in sync with the `[default alias: blah]` notes
+# in the first line of the relevant commands' help text.
 b = ["bookmark"]
 ci = ["commit"]
+desc = ["describe"]
+st = ["status"]
 
 [diff.color-words]
 conflict = "materialize"
@@ -13,18 +16,22 @@ context = 3
 [diff.git]
 context = 3
 
+[experimental-advance-branches]
+enabled-branches = []
+disabled-branches = []
+
 [git]
+colocate = true
 private-commits = "none()"
-push-bookmark-prefix = "push-"
 push-new-bookmarks = false
 sign-on-push = false
+track-default-bookmark-on-clone = true
 
 [ui]
-always-allow-large-revsets = false
+always-allow-large-revsets = true
 color = "auto"
+diff-formatter = ":color-words"
 diff-instructions = true
-diff.format = "color-words"
-# diff.tool = <use-format>
 graph.style = "curved"
 pager = { command = ["less", "-FRX"], env = { LESSCHARSET = "utf-8" } }
 paginate = "auto"
@@ -36,6 +43,9 @@ conflict-marker-style = "diff"
 # signature verification is slow, disable by default
 show-cryptographic-signatures = false
 bookmark-list-sort-keys = ["name"]
+tag-list-sort-keys = ["name"]
+# TODO: delete revsets-use-glob-by-default in jj 0.43+
+revsets-use-glob-by-default = true
 
 [ui.movement]
 edit = false

@@ -18,11 +18,11 @@ use jj_lib::object_id::ObjectId as _;
 use jj_lib::op_store::RefTarget;
 use jj_lib::ref_name::RefNameBuf;
 
-use crate::cli_util::has_tracked_remote_bookmarks;
 use crate::cli_util::CommandHelper;
 use crate::cli_util::RevisionArg;
-use crate::command_error::user_error_with_hint;
+use crate::cli_util::has_tracked_remote_bookmarks;
 use crate::command_error::CommandError;
+use crate::command_error::user_error_with_hint;
 use crate::complete;
 use crate::revset_util;
 use crate::ui::Ui;
@@ -30,20 +30,16 @@ use crate::ui::Ui;
 /// Create a new bookmark
 #[derive(clap::Args, Clone, Debug)]
 pub struct BookmarkCreateArgs {
-    // TODO(#5374): Make required in jj 0.32+
     /// The bookmark's target revision
-    //
-    // The `--to` alias exists for making it easier for the user to switch
-    // between `bookmark create`, `bookmark move`, and `bookmark set`. Currently target revision
-    // defaults to the working copy if not specified, but in the near future it will be required to
-    // explicitly specify it.
     #[arg(
-        long, short,
+        long,
+        short,
+        default_value = "@",
         visible_alias = "to",
-        value_name = "REVSET",
-        add = ArgValueCompleter::new(complete::revset_expression_all),
+        value_name = "REVSET"
     )]
-    revision: Option<RevisionArg>,
+    #[arg(add = ArgValueCompleter::new(complete::revset_expression_all))]
+    revision: RevisionArg,
 
     /// The bookmarks to create
     #[arg(required = true, value_parser = revset_util::parse_bookmark_name)]
@@ -56,16 +52,9 @@ pub fn cmd_bookmark_create(
     args: &BookmarkCreateArgs,
 ) -> Result<(), CommandError> {
     let mut workspace_command = command.workspace_helper(ui)?;
-    if args.revision.is_none() {
-        writeln!(
-            ui.warning_default(),
-            "Target revision was not specified, defaulting to the working copy (-r@). In the near \
-             future it will be required to explicitly specify target revision."
-        )?;
-    }
-    let target_commit = workspace_command
-        .resolve_single_rev(ui, args.revision.as_ref().unwrap_or(&RevisionArg::AT))?;
-    let view = workspace_command.repo().view();
+    let target_commit = workspace_command.resolve_single_rev(ui, &args.revision)?;
+    let repo = workspace_command.repo().as_ref();
+    let view = repo.view();
     let bookmark_names = &args.names;
     for name in bookmark_names {
         if view.get_local_bookmark(name).is_present() {
@@ -74,7 +63,7 @@ pub fn cmd_bookmark_create(
                 "Use `jj bookmark set` to update it.",
             ));
         }
-        if has_tracked_remote_bookmarks(view, name) {
+        if has_tracked_remote_bookmarks(repo, name) {
             return Err(user_error_with_hint(
                 format!(
                     "Tracked remote bookmarks exist for deleted bookmark: {name}",
@@ -82,17 +71,40 @@ pub fn cmd_bookmark_create(
                 ),
                 format!(
                     "Use `jj bookmark set` to recreate the local bookmark. Run `jj bookmark \
-                     untrack 'glob:{name}@*'` to disassociate them.",
+                     untrack {name}` to disassociate them.",
                     name = name.as_symbol()
                 ),
             ));
         }
     }
+    if target_commit.is_discardable(repo)? {
+        writeln!(ui.warning_default(), "Target revision is empty.")?;
+    }
 
     let mut tx = workspace_command.start_transaction();
+    let remote_settings = tx.settings().remote_settings()?;
+    let remote_auto_track_matchers =
+        revset_util::parse_remote_auto_track_bookmarks_map(ui, &remote_settings)?;
+    let readonly_repo = tx.base_repo().clone();
     for name in bookmark_names {
         tx.repo_mut()
             .set_local_bookmark_target(name, RefTarget::normal(target_commit.id().clone()));
+        for (remote_name, matcher) in &remote_auto_track_matchers {
+            if !matcher.is_match(name.as_str()) {
+                continue;
+            }
+            let Some(view) = readonly_repo.view().get_remote_view(remote_name) else {
+                continue;
+            };
+            let symbol = name.to_remote_symbol(remote_name);
+            if view.bookmarks.contains_key(name) {
+                writeln!(
+                    ui.warning_default(),
+                    "Auto-tracking bookmark that exists on the remote: {symbol}"
+                )?;
+            }
+            tx.repo_mut().track_remote_bookmark(symbol)?;
+        }
     }
 
     if let Some(mut formatter) = ui.status_formatter() {

@@ -1,6 +1,5 @@
 # Operation log
 
-
 ## Introduction
 
 Jujutsu records each operation that modifies the repo in the "operation log".
@@ -13,9 +12,10 @@ and the current working-copy commit in each workspace. The operation object also
 before it, as well as metadata about the operation, such as timestamps,
 username, hostname, description.
 
-The operation log allows you to undo an operation (`jj [op] undo`), which doesn't
-need to be the most recent one. It also lets you restore the entire repo to the
-way it looked at an earlier point (`jj op restore`).
+The operation log allows you to undo operations one-by-one (`jj undo`) or even
+revert a specific one which isn't the most recent operation (`jj op revert`). It
+also lets you restore the entire repo to the way it looked at an earlier point
+(`jj op restore`).
 
 When referring to operations, you can use `@` to represent the current
 operation.
@@ -25,8 +25,7 @@ The following operators are supported:
 * `x-`: Parents of `x` (e.g. `@-`)
 * `x+`: Children of `x`
 
-
-## divergent operations
+## Divergent operations
 
 One benefit of the operation log (and the reason for its creation) is that it
 allows lock-free concurrency -- you can run concurrent `jj` commands without
@@ -42,7 +41,6 @@ As an example, let's say you had started editing the description of a change and
 then also update the contents of the change (maybe because you had forgotten the
 editor). When you eventually close your editor, the command will succeed and
 e.g. `jj log` will indicate that the change has diverged.
-
 
 ## Loading an old version of the repo
 

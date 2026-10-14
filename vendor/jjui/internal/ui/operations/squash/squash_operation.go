@@ -1,0 +1,175 @@
+package squash
+
+import (
+	"slices"
+	"strings"
+
+	tea "charm.land/bubbletea/v2"
+	"github.com/idursun/jjui/internal/jj"
+	"github.com/idursun/jjui/internal/jj/source"
+	"github.com/idursun/jjui/internal/ui/actions"
+	"github.com/idursun/jjui/internal/ui/common"
+	"github.com/idursun/jjui/internal/ui/context"
+	"github.com/idursun/jjui/internal/ui/intents"
+	"github.com/idursun/jjui/internal/ui/layout"
+	"github.com/idursun/jjui/internal/ui/operations"
+	"github.com/idursun/jjui/internal/ui/operations/target_picker"
+	"github.com/idursun/jjui/internal/ui/render"
+	"github.com/idursun/jjui/internal/ui/theme"
+)
+
+var (
+	_ operations.Operation = (*Operation)(nil)
+	_ common.Focusable     = (*Operation)(nil)
+	_ common.ScopeProvider = (*Operation)(nil)
+)
+
+type Operation struct {
+	context               *context.MainContext
+	from                  jj.SelectedRevisions
+	files                 []jj.FileName
+	current               *jj.Commit
+	targetName            string
+	keepEmptied           bool
+	useDestinationMessage bool
+	interactive           bool
+}
+
+func (s *Operation) IsFocused() bool {
+	return true
+}
+
+func (s *Operation) Scopes() []common.Scope {
+	return []common.Scope{
+		{
+			Name:    actions.ScopeSquash,
+			Leak:    common.LeakAll,
+			Handler: s,
+		},
+	}
+}
+
+func (s *Operation) Init() tea.Cmd {
+	return nil
+}
+
+func (s *Operation) Update(msg tea.Msg) tea.Cmd {
+	switch msg := msg.(type) {
+	case target_picker.TargetSelectedMsg:
+		s.targetName = strings.TrimSpace(msg.Target)
+		cmd, _ := s.HandleIntent(intents.Apply{Force: msg.Force})
+		return cmd
+	case common.SelectionChangedMsg:
+		selected, ok := msg.Item.(common.SelectedRevision)
+		if !ok {
+			return nil
+		}
+		return s.setSelectedRevision(&jj.Commit{ChangeId: selected.ChangeId, CommitId: selected.CommitId})
+	case intents.Intent:
+		cmd, _ := s.HandleIntent(msg)
+		return cmd
+	}
+	return nil
+}
+
+func (s *Operation) HandleIntent(intent intents.Intent) (tea.Cmd, bool) {
+	switch intent := intent.(type) {
+	case intents.StartAceJump:
+		return common.StartAceJump(), true
+	case intents.Apply:
+		args := jj.Squash(s.from, s.targetArg(), s.files, s.keepEmptied, s.useDestinationMessage, s.interactive, intent.Force)
+		continuation := common.RefreshAndSelect(s.current.GetChangeId())
+		if s.interactive || !s.useDestinationMessage {
+			return tea.Batch(common.CloseApplied, s.context.RunInteractiveCommand(args, continuation)), true
+		}
+		return tea.Batch(common.CloseApplied, s.context.RunCommand(args, continuation)), true
+	case intents.SquashOpenTargetPicker:
+		return common.OpenTargetPicker(source.BookmarkSource{}, source.TagSource{}), true
+	case intents.Cancel:
+		return common.Close, true
+	case intents.SquashToggleOption:
+		switch intent.Option {
+		case intents.SquashOptionKeepEmptied:
+			s.keepEmptied = !s.keepEmptied
+		case intents.SquashOptionUseDestinationMessage:
+			s.useDestinationMessage = !s.useDestinationMessage
+		case intents.SquashOptionInteractive:
+			s.interactive = !s.interactive
+		}
+		return nil, true
+	}
+	return nil, false
+}
+
+func (s *Operation) ViewRect(_ *render.DisplayContext, _ layout.Box) {}
+
+func (s *Operation) setSelectedRevision(commit *jj.Commit) tea.Cmd {
+	if s.current.Equal(commit) {
+		return nil
+	}
+	s.current = commit
+	return nil
+}
+
+func (s *Operation) Render(commit *jj.Commit, pos operations.RenderPosition) string {
+	if pos != operations.RenderBeforeChangeId {
+		return ""
+	}
+	sourceMarkerStyle := theme.DefaultPalette.Get("squash", "", "source_marker", false)
+	targetMarkerStyle := theme.DefaultPalette.Get("squash", "", "target_marker", false)
+
+	isSelected := s.current != nil && s.current.GetChangeId() == commit.GetChangeId()
+	if isSelected {
+		marker := "<< into >>"
+		if s.useDestinationMessage {
+			marker = "<< use this message >>"
+		}
+		return targetMarkerStyle.Render(marker)
+	}
+	sourceIds := s.from.GetIds()
+	if slices.Contains(sourceIds, commit.ChangeId) {
+		marker := "<< from >>"
+		if s.keepEmptied {
+			marker = "<< keep empty >>"
+		}
+		if s.interactive {
+			marker += " (interactive)"
+		}
+		return sourceMarkerStyle.Render(marker)
+	}
+	return ""
+}
+
+func (s *Operation) Name() string {
+	return "squash"
+}
+
+func (s *Operation) targetArg() string {
+	if strings.TrimSpace(s.targetName) != "" {
+		return s.targetName
+	}
+	if s.current != nil {
+		return s.current.GetChangeId()
+	}
+	return ""
+}
+
+type Option func(*Operation)
+
+func WithFiles(files []jj.FileName) Option {
+	return func(op *Operation) {
+		op.files = files
+	}
+}
+
+func NewOperation(context *context.MainContext, from jj.SelectedRevisions, current *jj.Commit, opts ...Option) *Operation {
+	o := &Operation{
+		context: context,
+		from:    from,
+		current: current,
+	}
+	for _, opt := range opts {
+		opt(o)
+	}
+	return o
+}

@@ -20,28 +20,28 @@ use clap_complete::ArgValueCompleter;
 use itertools::Itertools as _;
 use jj_lib::backend::CommitId;
 use jj_lib::commit::Commit;
-use jj_lib::commit::CommitIteratorExt as _;
 use jj_lib::object_id::ObjectId as _;
 use jj_lib::repo::ReadonlyRepo;
 use jj_lib::repo::Repo as _;
 use jj_lib::revset::RevsetExpression;
-use jj_lib::revset::RevsetIteratorExt as _;
-use jj_lib::rewrite::move_commits;
-use jj_lib::rewrite::EmptyBehaviour;
+use jj_lib::rewrite::EmptyBehavior;
+use jj_lib::rewrite::MoveCommitsLocation;
 use jj_lib::rewrite::MoveCommitsStats;
 use jj_lib::rewrite::MoveCommitsTarget;
 use jj_lib::rewrite::RebaseOptions;
 use jj_lib::rewrite::RewriteRefsOptions;
+use jj_lib::rewrite::compute_move_commits;
+use jj_lib::rewrite::find_duplicate_divergent_commits;
 use tracing::instrument;
 
-use crate::cli_util::compute_commit_location;
-use crate::cli_util::short_commit_hash;
 use crate::cli_util::CommandHelper;
 use crate::cli_util::RevisionArg;
 use crate::cli_util::WorkspaceCommandHelper;
-use crate::command_error::cli_error;
-use crate::command_error::user_error;
+use crate::cli_util::compute_commit_location;
+use crate::cli_util::print_updated_commits;
+use crate::cli_util::short_commit_hash;
 use crate::command_error::CommandError;
+use crate::command_error::user_error;
 use crate::complete;
 use crate::ui::Ui;
 
@@ -62,7 +62,7 @@ use crate::ui::Ui;
 /// There are three different ways of specifying where the revisions should be
 /// rebased to:
 ///
-/// * `--destination/-d` to rebase the revisions onto the specified targets
+/// * `--onto/-o` to rebase the revisions onto the specified targets
 /// * `--insert-after/-A` to rebase the revisions onto the specified targets and
 ///   to rebase the targets' descendants onto the rebased revisions
 /// * `--insert-before/-B` to rebase the revisions onto the specified targets'
@@ -78,7 +78,7 @@ use crate::ui::Ui;
 /// ### Specifying which revisions to rebase
 ///
 /// With `--source/-s`, the command rebases the specified revision and its
-/// descendants onto the destination. For example, `jj rebase -s M -d O` would
+/// descendants to the destination. For example, `jj rebase -s M -o O` would
 /// transform your history like this (letters followed by an apostrophe are
 /// post-rebase versions):
 ///
@@ -97,9 +97,8 @@ use crate::ui::Ui;
 /// ```
 ///
 /// Each revision passed to `-s` will become a direct child of the destination,
-/// so if you instead run `jj rebase -s M -s N -d O` (or
-/// `jj rebase -s 'all:M|N' -d O`) in the example above, then N' would instead
-/// be a direct child of O.
+/// so if you instead run `jj rebase -s M -s N -o O` (or `jj rebase -s 'M|N' -o
+/// O`) in the example above, then N' would instead be a direct child of O.
 ///
 /// With `--branch/-b`, the command rebases the whole "branch" containing the
 /// specified revision. A "branch" is the set of revisions that includes:
@@ -108,10 +107,10 @@ use crate::ui::Ui;
 ///   destination
 /// * all descendants of those revisions
 ///
-/// In other words, `jj rebase -b X -d Y` rebases revisions in the revset
-/// `(Y..X)::` (which is equivalent to `jj rebase -s 'roots(Y..X)' -d Y` for a
-/// single root). For example, either `jj rebase -b L -d O` or `jj rebase -b M
-/// -d O` would transform your history like this (because `L` and `M` are on the
+/// In other words, `jj rebase -b X -o Y` rebases revisions in the revset
+/// `(Y..X)::` (which is equivalent to `jj rebase -s 'roots(Y..X)' -o Y` for a
+/// single root). For example, either `jj rebase -b L -o O` or `jj rebase -b M
+/// -o O` would transform your history like this (because `L` and `M` are on the
 /// same "branch", relative to the destination):
 ///
 /// ```text
@@ -128,10 +127,10 @@ use crate::ui::Ui;
 /// J           J
 /// ```
 ///
-/// With `--revisions/-r`, the command rebases only the specified revisions onto
+/// With `--revisions/-r`, the command rebases only the specified revisions to
 /// the destination. Any "hole" left behind will be filled by rebasing
 /// descendants onto the specified revisions' parent(s). For example,
-/// `jj rebase -r K -d M` would transform your history like this:
+/// `jj rebase -r K -o M` would transform your history like this:
 ///
 /// ```text
 /// M          K'
@@ -144,7 +143,7 @@ use crate::ui::Ui;
 /// ```
 ///
 /// Multiple revisions can be specified, and any dependencies (graph edges)
-/// within the set will be preserved. For example, `jj rebase -r 'K|N' -d O`
+/// within the set will be preserved. For example, `jj rebase -r 'K|N' -o O`
 /// would transform your history like this:
 ///
 /// ```text
@@ -167,10 +166,10 @@ use crate::ui::Ui;
 /// of the specified revisions an immediate child of the destination, while
 /// `jj rebase -r` will preserve dependencies within the set.
 ///
-/// Note that you can create a merge revision by repeating the `-d` argument.
+/// Note that you can create a merge revision by repeating the `-o` argument.
 /// For example, if you realize that revision L actually depends on revision M
 /// in order to work (in addition to its current parent K), you can run `jj
-/// rebase -s L -d K -d M`:
+/// rebase -s L -o K -o M`:
 ///
 /// ```text
 /// M          L'
@@ -184,12 +183,12 @@ use crate::ui::Ui;
 ///
 /// ### Specifying where to rebase the revisions
 ///
-/// With `--destination/-d`, the command rebases the selected revisions onto
-/// the targets. Existing descendants of the targets will not be affected. See
+/// With `--onto/-o`, the command rebases the selected revisions onto the
+/// targets. Existing descendants of the targets will not be affected. See
 /// the section above for examples.
 ///
 /// With `--insert-after/-A`, the selected revisions will be inserted after the
-/// targets. This is similar to `-d`, but if the targets have any existing
+/// targets. This is similar to `-o`, but if the targets have any existing
 /// descendants, then those will be rebased onto the rebased selected revisions.
 ///
 /// For example, `jj rebase -r K -A L` will rewrite history like this:
@@ -237,7 +236,7 @@ use crate::ui::Ui;
 ///
 /// The `-A` and `-B` arguments can also be combined, which can be useful around
 /// merges. For example, you can use `jj rebase -r K -A J -B M` to create a new
-/// merge (but `jj rebase -r M -d L -d K` might be simpler in this particular
+/// merge (but `jj rebase -r M -o L -o K` might be simpler in this particular
 /// case):
 /// ```text
 /// M           M'
@@ -270,16 +269,12 @@ pub(crate) struct RebaseArgs {
     /// Rebase the whole branch relative to destination's ancestors (can be
     /// repeated)
     ///
-    /// `jj rebase -b=br -d=dst` is equivalent to `jj rebase '-s=roots(dst..br)'
-    /// -d=dst`.
+    /// `jj rebase -b=br -o=dst` is equivalent to `jj rebase '-s=roots(dst..br)'
+    /// -o=dst`.
     ///
     /// If none of `-b`, `-s`, or `-r` is provided, then the default is `-b @`.
-    #[arg(
-        long,
-        short,
-        value_name = "REVSETS",
-        add = ArgValueCompleter::new(complete::revset_expression_mutable),
-    )]
+    #[arg(long, short, value_name = "REVSETS")]
+    #[arg(add = ArgValueCompleter::new(complete::revset_expression_mutable))]
     branch: Vec<RevisionArg>,
 
     /// Rebase specified revision(s) together with their trees of descendants
@@ -290,13 +285,10 @@ pub(crate) struct RebaseArgs {
     /// of others.
     ///
     /// If none of `-b`, `-s`, or `-r` is provided, then the default is `-b @`.
-    #[arg(
-        long,
-        short,
-        value_name = "REVSETS",
-        add = ArgValueCompleter::new(complete::revset_expression_mutable),
-    )]
+    #[arg(long, short, value_name = "REVSETS")]
+    #[arg(add = ArgValueCompleter::new(complete::revset_expression_mutable))]
     source: Vec<RevisionArg>,
+
     /// Rebase the given revisions, rebasing descendants onto this revision's
     /// parent(s)
     ///
@@ -304,20 +296,12 @@ pub(crate) struct RebaseArgs {
     /// descendant of `A`.
     ///
     /// If none of `-b`, `-s`, or `-r` is provided, then the default is `-b @`.
-    #[arg(
-        long,
-        short,
-        value_name = "REVSETS",
-        add = ArgValueCompleter::new(complete::revset_expression_mutable),
-    )]
+    #[arg(long, short, value_name = "REVSETS")]
+    #[arg(add = ArgValueCompleter::new(complete::revset_expression_mutable))]
     revisions: Vec<RevisionArg>,
 
     #[command(flatten)]
     destination: RebaseDestinationArgs,
-
-    /// Deprecated. Use --skip-emptied instead.
-    #[arg(long, conflicts_with = "revisions", hide = true)]
-    skip_empty: bool,
 
     /// If true, when rebasing would produce an empty commit, the commit is
     /// abandoned. It will not be abandoned if it was already empty before the
@@ -325,6 +309,14 @@ pub(crate) struct RebaseArgs {
     /// parents.
     #[arg(long)]
     skip_emptied: bool,
+
+    /// Keep divergent commits while rebasing
+    ///
+    /// Without this flag, divergent commits are abandoned while rebasing if
+    /// another commit with the same change ID is already present in the
+    /// destination with identical changes.
+    #[arg(long)]
+    keep_divergent: bool,
 }
 
 #[derive(clap::Args, Clone, Debug)]
@@ -334,32 +326,36 @@ pub struct RebaseDestinationArgs {
     /// commit)
     #[arg(
         long,
+        alias = "destination",
         short,
-        value_name = "REVSETS",
-        add = ArgValueCompleter::new(complete::revset_expression_all),
+        visible_short_alias = 'd',
+        value_name = "REVSETS"
     )]
-    destination: Option<Vec<RevisionArg>>,
+    #[arg(add = ArgValueCompleter::new(complete::revset_expression_all))]
+    onto: Option<Vec<RevisionArg>>,
+
     /// The revision(s) to insert after (can be repeated to create a merge
     /// commit)
     #[arg(
         long,
         short = 'A',
         visible_alias = "after",
-        conflicts_with = "destination",
-        value_name = "REVSETS",
-        add = ArgValueCompleter::new(complete::revset_expression_all),
+        conflicts_with = "onto",
+        value_name = "REVSETS"
     )]
+    #[arg(add = ArgValueCompleter::new(complete::revset_expression_all))]
     insert_after: Option<Vec<RevisionArg>>,
+
     /// The revision(s) to insert before (can be repeated to create a merge
     /// commit)
     #[arg(
         long,
         short = 'B',
         visible_alias = "before",
-        conflicts_with = "destination",
-        value_name = "REVSETS",
-        add = ArgValueCompleter::new(complete::revset_expression_mutable),
+        conflicts_with = "onto",
+        value_name = "REVSETS"
     )]
+    #[arg(add = ArgValueCompleter::new(complete::revset_expression_mutable))]
     insert_before: Option<Vec<RevisionArg>>,
 }
 
@@ -369,16 +365,10 @@ pub(crate) fn cmd_rebase(
     command: &CommandHelper,
     args: &RebaseArgs,
 ) -> Result<(), CommandError> {
-    if args.skip_empty {
-        return Err(cli_error(
-            "--skip-empty is deprecated, and has been renamed to --skip-emptied.",
-        ));
-    }
-
     let rebase_options = RebaseOptions {
         empty: match args.skip_emptied {
-            true => EmptyBehaviour::AbandonNewlyEmpty,
-            false => EmptyBehaviour::Keep,
+            true => EmptyBehavior::AbandonNewlyEmpty,
+            false => EmptyBehavior::Keep,
         },
         rewrite_refs: RewriteRefsOptions {
             delete_abandoned_bookmarks: false,
@@ -386,7 +376,7 @@ pub(crate) fn cmd_rebase(
         simplify_ancestor_merge: false,
     };
     let mut workspace_command = command.workspace_helper(ui)?;
-    let plan = if !args.revisions.is_empty() {
+    let loc = if !args.revisions.is_empty() {
         plan_rebase_revisions(ui, &workspace_command, &args.revisions, &args.destination)?
     } else if !args.source.is_empty() {
         plan_rebase_source(ui, &workspace_command, &args.source, &args.destination)?
@@ -395,29 +385,31 @@ pub(crate) fn cmd_rebase(
     };
 
     let mut tx = workspace_command.start_transaction();
-    let new_children: Vec<_> = plan
-        .new_child_ids
-        .iter()
-        .map(|commit_id| tx.repo().store().get_commit(commit_id))
-        .try_collect()?;
-    let stats = move_commits(
-        tx.repo_mut(),
-        &plan.new_parent_ids,
-        &new_children,
-        &plan.target,
-        &rebase_options,
-    )?;
+    let mut computed_move = compute_move_commits(tx.repo(), &loc)?;
+    if !args.keep_divergent {
+        let abandoned_divergent =
+            find_duplicate_divergent_commits(tx.repo(), &loc.new_parent_ids, &loc.target)?;
+        computed_move.record_to_abandon(abandoned_divergent.iter().map(Commit::id).cloned());
+        if !abandoned_divergent.is_empty()
+            && let Some(mut formatter) = ui.status_formatter()
+        {
+            writeln!(
+                formatter,
+                "Abandoned {} divergent commits that were already present in the destination:",
+                abandoned_divergent.len(),
+            )?;
+            print_updated_commits(
+                formatter.as_mut(),
+                &tx.base_workspace_helper().commit_summary_template(),
+                &abandoned_divergent,
+            )?;
+        }
+    };
+    let stats = computed_move.apply(tx.repo_mut(), &rebase_options)?;
     print_move_commits_stats(ui, &stats)?;
-    tx.finish(ui, tx_description(&plan.target))?;
+    tx.finish(ui, tx_description(&loc.target))?;
 
     Ok(())
-}
-
-#[derive(Clone, Debug)]
-struct RebasePlan {
-    new_parent_ids: Vec<CommitId>,
-    new_child_ids: Vec<CommitId>,
-    target: MoveCommitsTarget,
 }
 
 fn plan_rebase_revisions(
@@ -425,35 +417,38 @@ fn plan_rebase_revisions(
     workspace_command: &WorkspaceCommandHelper,
     revisions: &[RevisionArg],
     rebase_destination: &RebaseDestinationArgs,
-) -> Result<RebasePlan, CommandError> {
-    let target_commits: Vec<_> = workspace_command
+) -> Result<MoveCommitsLocation, CommandError> {
+    let target_expr = workspace_command
         .parse_union_revsets(ui, revisions)?
-        .evaluate_to_commits()?
+        .resolve()?;
+    workspace_command.check_rewritable_expr(&target_expr)?;
+    let target_commit_ids: Vec<_> = target_expr
+        .evaluate(workspace_command.repo().as_ref())?
+        .iter()
         .try_collect()?; // in reverse topological order
-    workspace_command.check_rewritable(target_commits.iter().ids())?;
 
     let (new_parent_ids, new_child_ids) = compute_commit_location(
         ui,
         workspace_command,
-        rebase_destination.destination.as_deref(),
+        rebase_destination.onto.as_deref(),
         rebase_destination.insert_after.as_deref(),
         rebase_destination.insert_before.as_deref(),
         "rebased commits",
     )?;
-    if rebase_destination.destination.is_some() && new_child_ids.is_empty() {
-        for commit in &target_commits {
-            if new_parent_ids.contains(commit.id()) {
+    if rebase_destination.onto.is_some() {
+        for id in &target_commit_ids {
+            if new_parent_ids.contains(id) {
                 return Err(user_error(format!(
                     "Cannot rebase {} onto itself",
-                    short_commit_hash(commit.id()),
+                    short_commit_hash(id),
                 )));
             }
         }
     }
-    Ok(RebasePlan {
+    Ok(MoveCommitsLocation {
         new_parent_ids,
         new_child_ids,
-        target: MoveCommitsTarget::Commits(target_commits),
+        target: MoveCommitsTarget::Commits(target_commit_ids),
     })
 }
 
@@ -462,32 +457,29 @@ fn plan_rebase_source(
     workspace_command: &WorkspaceCommandHelper,
     source: &[RevisionArg],
     rebase_destination: &RebaseDestinationArgs,
-) -> Result<RebasePlan, CommandError> {
-    let source_commits: Vec<_> = workspace_command
-        .resolve_some_revsets_default_single(ui, source)?
-        .iter()
-        .map(|id| workspace_command.repo().store().get_commit(id))
-        .try_collect()?;
-    workspace_command.check_rewritable(source_commits.iter().ids())?;
+) -> Result<MoveCommitsLocation, CommandError> {
+    let source_commit_ids = Vec::from_iter(workspace_command.resolve_some_revsets(ui, source)?);
+    workspace_command.check_rewritable(&source_commit_ids)?;
 
     let (new_parent_ids, new_child_ids) = compute_commit_location(
         ui,
         workspace_command,
-        rebase_destination.destination.as_deref(),
+        rebase_destination.onto.as_deref(),
         rebase_destination.insert_after.as_deref(),
         rebase_destination.insert_before.as_deref(),
         "rebased commits",
     )?;
-    if rebase_destination.destination.is_some() && new_child_ids.is_empty() {
-        for commit in &source_commits {
-            check_rebase_destinations(workspace_command.repo(), &new_parent_ids, commit)?;
+    if rebase_destination.onto.is_some() {
+        for id in &source_commit_ids {
+            let commit = workspace_command.repo().store().get_commit(id)?;
+            check_rebase_destinations(workspace_command.repo(), &new_parent_ids, &commit)?;
         }
     }
 
-    Ok(RebasePlan {
+    Ok(MoveCommitsLocation {
         new_parent_ids,
         new_child_ids,
-        target: MoveCommitsTarget::Roots(source_commits),
+        target: MoveCommitsTarget::Roots(source_commit_ids),
     })
 }
 
@@ -496,15 +488,17 @@ fn plan_rebase_branch(
     workspace_command: &WorkspaceCommandHelper,
     branch: &[RevisionArg],
     rebase_destination: &RebaseDestinationArgs,
-) -> Result<RebasePlan, CommandError> {
+) -> Result<MoveCommitsLocation, CommandError> {
     let branch_commit_ids: Vec<_> = if branch.is_empty() {
-        vec![workspace_command
-            .resolve_single_rev(ui, &RevisionArg::AT)?
-            .id()
-            .clone()]
+        vec![
+            workspace_command
+                .resolve_single_rev(ui, &RevisionArg::AT)?
+                .id()
+                .clone(),
+        ]
     } else {
         workspace_command
-            .resolve_some_revsets_default_single(ui, branch)?
+            .resolve_some_revsets(ui, branch)?
             .into_iter()
             .collect()
     };
@@ -512,7 +506,7 @@ fn plan_rebase_branch(
     let (new_parent_ids, new_child_ids) = compute_commit_location(
         ui,
         workspace_command,
-        rebase_destination.destination.as_deref(),
+        rebase_destination.onto.as_deref(),
         rebase_destination.insert_after.as_deref(),
         rebase_destination.insert_before.as_deref(),
         "rebased commits",
@@ -520,23 +514,23 @@ fn plan_rebase_branch(
     let roots_expression = RevsetExpression::commits(new_parent_ids.clone())
         .range(&RevsetExpression::commits(branch_commit_ids))
         .roots();
-    let root_commits: Vec<_> = roots_expression
+    workspace_command.check_rewritable_expr(&roots_expression)?;
+    let root_commit_ids: Vec<_> = roots_expression
         .evaluate(workspace_command.repo().as_ref())
         .unwrap()
         .iter()
-        .commits(workspace_command.repo().store())
         .try_collect()?;
-    workspace_command.check_rewritable(root_commits.iter().ids())?;
-    if rebase_destination.destination.is_some() && new_child_ids.is_empty() {
-        for commit in &root_commits {
-            check_rebase_destinations(workspace_command.repo(), &new_parent_ids, commit)?;
+    if rebase_destination.onto.is_some() {
+        for id in &root_commit_ids {
+            let commit = workspace_command.repo().store().get_commit(id)?;
+            check_rebase_destinations(workspace_command.repo(), &new_parent_ids, &commit)?;
         }
     }
 
-    Ok(RebasePlan {
+    Ok(MoveCommitsLocation {
         new_parent_ids,
         new_child_ids,
-        target: MoveCommitsTarget::Roots(root_commits),
+        target: MoveCommitsTarget::Roots(root_commit_ids),
     })
 }
 
@@ -546,7 +540,13 @@ fn check_rebase_destinations(
     commit: &Commit,
 ) -> Result<(), CommandError> {
     for parent_id in new_parents {
-        if repo.index().is_ancestor(commit.id(), parent_id) {
+        if parent_id == commit.id() {
+            return Err(user_error(format!(
+                "Cannot rebase {} onto itself",
+                short_commit_hash(commit.id()),
+            )));
+        }
+        if repo.index().is_ancestor(commit.id(), parent_id)? {
             return Err(user_error(format!(
                 "Cannot rebase {} onto descendant {}",
                 short_commit_hash(commit.id()),
@@ -559,18 +559,16 @@ fn check_rebase_destinations(
 
 fn tx_description(target: &MoveCommitsTarget) -> String {
     match &target {
-        MoveCommitsTarget::Commits(commits) => match &commits[..] {
-            [] => format!("rebase {} commits", commits.len()),
-            [commit] => format!("rebase commit {}", commit.id().hex()),
-            [first, others @ ..] => format!(
-                "rebase commit {} and {} more",
-                first.id().hex(),
-                others.len()
-            ),
+        MoveCommitsTarget::Commits(ids) => match &ids[..] {
+            [] => format!("rebase {} commits", ids.len()),
+            [id] => format!("rebase commit {}", id.hex()),
+            [first, others @ ..] => {
+                format!("rebase commit {} and {} more", first.hex(), others.len())
+            }
         },
-        MoveCommitsTarget::Roots(commits) => match &commits[..] {
-            [commit] => format!("rebase commit {} and descendants", commit.id().hex()),
-            _ => format!("rebase {} commits and their descendants", commits.len()),
+        MoveCommitsTarget::Roots(ids) => match &ids[..] {
+            [id] => format!("rebase commit {} and descendants", id.hex()),
+            _ => format!("rebase {} commits and their descendants", ids.len()),
         },
     }
 }
@@ -584,7 +582,8 @@ fn print_move_commits_stats(ui: &Ui, stats: &MoveCommitsStats) -> std::io::Resul
         num_rebased_targets,
         num_rebased_descendants,
         num_skipped_rebases,
-        num_abandoned,
+        num_abandoned_empty,
+        rebased_commits: _,
     } = stats;
     if num_skipped_rebases > 0 {
         writeln!(
@@ -595,7 +594,7 @@ fn print_move_commits_stats(ui: &Ui, stats: &MoveCommitsStats) -> std::io::Resul
     if num_rebased_targets > 0 {
         writeln!(
             formatter,
-            "Rebased {num_rebased_targets} commits onto destination"
+            "Rebased {num_rebased_targets} commits to destination"
         )?;
     }
     if num_rebased_descendants > 0 {
@@ -604,8 +603,11 @@ fn print_move_commits_stats(ui: &Ui, stats: &MoveCommitsStats) -> std::io::Resul
             "Rebased {num_rebased_descendants} descendant commits"
         )?;
     }
-    if num_abandoned > 0 {
-        writeln!(formatter, "Abandoned {num_abandoned} newly emptied commits")?;
+    if num_abandoned_empty > 0 {
+        writeln!(
+            formatter,
+            "Abandoned {num_abandoned_empty} newly emptied commits"
+        )?;
     }
     Ok(())
 }

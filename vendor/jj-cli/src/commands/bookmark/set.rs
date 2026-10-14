@@ -12,6 +12,8 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::collections::HashSet;
+
 use clap_complete::ArgValueCandidates;
 use clap_complete::ArgValueCompleter;
 use itertools::Itertools as _;
@@ -20,11 +22,11 @@ use jj_lib::op_store::RefTarget;
 use jj_lib::ref_name::RefNameBuf;
 
 use super::is_fast_forward;
-use crate::cli_util::has_tracked_remote_bookmarks;
 use crate::cli_util::CommandHelper;
 use crate::cli_util::RevisionArg;
-use crate::command_error::user_error_with_hint;
+use crate::cli_util::has_tracked_remote_bookmarks;
 use crate::command_error::CommandError;
+use crate::command_error::user_error_with_hint;
 use crate::complete;
 use crate::revset_util;
 use crate::ui::Ui;
@@ -32,29 +34,24 @@ use crate::ui::Ui;
 /// Create or update a bookmark to point to a certain commit
 #[derive(clap::Args, Clone, Debug)]
 pub struct BookmarkSetArgs {
-    // TODO(#5374): Make required in jj 0.32+
     /// The bookmark's target revision
-    //
-    // Currently target revision defaults to the working copy if not specified, but in the near
-    // future it will be required to explicitly specify it.
     #[arg(
-        long, short,
+        long,
+        short,
+        default_value = "@",
         visible_alias = "to",
-        value_name = "REVSET",
-        add = ArgValueCompleter::new(complete::revset_expression_all),
+        value_name = "REVSET"
     )]
-    revision: Option<RevisionArg>,
+    #[arg(add = ArgValueCompleter::new(complete::revset_expression_all))]
+    revision: RevisionArg,
 
     /// Allow moving the bookmark backwards or sideways
     #[arg(long, short = 'B')]
     allow_backwards: bool,
 
     /// The bookmarks to update
-    #[arg(
-        required = true,
-        value_parser = revset_util::parse_bookmark_name,
-        add = ArgValueCandidates::new(complete::local_bookmarks),
-    )]
+    #[arg(required = true, value_parser = revset_util::parse_bookmark_name)]
+    #[arg(add = ArgValueCandidates::new(complete::local_bookmarks))]
     names: Vec<RefNameBuf>,
 }
 
@@ -64,29 +61,21 @@ pub fn cmd_bookmark_set(
     args: &BookmarkSetArgs,
 ) -> Result<(), CommandError> {
     let mut workspace_command = command.workspace_helper(ui)?;
-    if args.revision.is_none() {
-        writeln!(
-            ui.warning_default(),
-            "Target revision was not specified, defaulting to the working copy (--revision=@). In \
-             the near future it will be required to explicitly specify target revision."
-        )?;
-    }
-    let target_commit = workspace_command
-        .resolve_single_rev(ui, args.revision.as_ref().unwrap_or(&RevisionArg::AT))?;
+    let target_commit = workspace_command.resolve_single_rev(ui, &args.revision)?;
     let repo = workspace_command.repo().as_ref();
     let bookmark_names = &args.names;
-    let mut new_bookmark_count = 0;
+    let mut new_bookmarks = HashSet::new();
     let mut moved_bookmark_count = 0;
     for name in bookmark_names {
         let old_target = repo.view().get_local_bookmark(name);
         // If a bookmark is absent locally but is still tracking remote bookmarks,
         // we are resurrecting the local bookmark, not "creating" a new bookmark.
-        if old_target.is_absent() && !has_tracked_remote_bookmarks(repo.view(), name) {
-            new_bookmark_count += 1;
+        if old_target.is_absent() && !has_tracked_remote_bookmarks(repo, name) {
+            new_bookmarks.insert(name);
         } else if old_target.as_normal() != Some(target_commit.id()) {
             moved_bookmark_count += 1;
         }
-        if !args.allow_backwards && !is_fast_forward(repo, old_target, target_commit.id()) {
+        if !args.allow_backwards && !is_fast_forward(repo, old_target, target_commit.id())? {
             return Err(user_error_with_hint(
                 format!(
                     "Refusing to move bookmark backwards or sideways: {name}",
@@ -96,16 +85,40 @@ pub fn cmd_bookmark_set(
             ));
         }
     }
+    if target_commit.is_discardable(repo)? {
+        writeln!(ui.warning_default(), "Target revision is empty.")?;
+    }
 
     let mut tx = workspace_command.start_transaction();
-    for bookmark_name in bookmark_names {
-        tx.repo_mut().set_local_bookmark_target(
-            bookmark_name,
-            RefTarget::normal(target_commit.id().clone()),
-        );
+    let remote_settings = tx.settings().remote_settings()?;
+    let remote_auto_track_matchers =
+        revset_util::parse_remote_auto_track_bookmarks_map(ui, &remote_settings)?;
+    let readonly_repo = tx.base_repo().clone();
+    for name in bookmark_names {
+        tx.repo_mut()
+            .set_local_bookmark_target(name, RefTarget::normal(target_commit.id().clone()));
+        if new_bookmarks.contains(name) {
+            for (remote_name, matcher) in &remote_auto_track_matchers {
+                if !matcher.is_match(name.as_str()) {
+                    continue;
+                }
+                let Some(view) = readonly_repo.view().get_remote_view(remote_name) else {
+                    continue;
+                };
+                let symbol = name.to_remote_symbol(remote_name);
+                if view.bookmarks.contains_key(name) {
+                    writeln!(
+                        ui.warning_default(),
+                        "Auto-tracking bookmark that exists on the remote: {symbol}"
+                    )?;
+                }
+                tx.repo_mut().track_remote_bookmark(symbol)?;
+            }
+        }
     }
 
     if let Some(mut formatter) = ui.status_formatter() {
+        let new_bookmark_count = new_bookmarks.len();
         if new_bookmark_count > 0 {
             write!(
                 formatter,
@@ -119,9 +132,6 @@ pub fn cmd_bookmark_set(
             tx.write_commit_summary(formatter.as_mut(), &target_commit)?;
             writeln!(formatter)?;
         }
-    }
-    if bookmark_names.len() > 1 && args.revision.is_none() {
-        writeln!(ui.hint_default(), "Use -r to specify the target revision.")?;
     }
 
     tx.finish(

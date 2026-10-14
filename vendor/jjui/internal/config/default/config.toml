@@ -1,0 +1,107 @@
+limit = 0
+
+bindings_profile = ":builtin"
+
+[ui]
+  theme = ""
+  # background_blend = 0.4 # optional; overrides both variants of the selected theme (0.0 to 1.0)
+  # background_blend = { light = 0.2, dark = 0.4 } # optional per-variant overrides
+  # set_window_title controls the terminal window title:
+  #   true    - show the full repo path (default)
+  #   "full"  - same as true
+  #   "base"  - show only the directory name
+  #   false   - disable the title
+  set_window_title = true
+  auto_refresh_interval = 0
+  flash_message_display_seconds = 4 # 0 means display until manually dismissed
+  mouse_support = true
+  [ui.colors]
+
+[suggest]
+  [suggest.exec]
+    mode = "off"
+
+[revisions]
+  log_batching = true
+  log_batch_size = 50
+  # template = 'builtin_log_compact' # overrides jj's templates.log
+  # revset = "zzzzzzz"               # overrides jj's revsets.log
+
+[preview]
+  revision_command = ["show", "--color", "always", "-r", "$change_id"]
+  evolog_command = ["evolog", "--color", "always", "-r", "$commit_id", "-p", "-n", "1"]
+  oplog_command = ["op", "show", "$operation_id", "--color", "always"]
+  file_command = ["diff", "--color", "always", "-r", "$change_id", "$file"]
+  position = "auto"
+  show_at_start = false
+  width_percentage = 50.0
+  width_increment_percentage = 5.0
+
+[oplog]
+  limit = 200
+
+[git]
+  default_remote = "origin"
+
+[askpass]
+  enabled = true
+
+[bookmark]
+  interactive_bookmark_pane = false
+
+[[actions]]
+name = "revisions.evolog.split"
+lua = """
+ local historical_commit = context.commit_id()
+ if not historical_commit then
+   error("no evolog commit selected")
+ end
+
+ local change_id, err = jj({
+   "log",
+   "--ignore-working-copy",
+   "--no-graph",
+   "-r", historical_commit,
+   "-T", "change_id.shortest()",
+ })
+ if err then
+   error(err)
+ end
+
+ local current_commit
+ current_commit, err = jj({
+   "log",
+   "--ignore-working-copy",
+   "--no-graph",
+   "-r", change_id,
+   "-T", "commit_id.shortest()",
+ })
+ if err then
+   error(err)
+ end
+ if current_commit == historical_commit then
+   error("select a hidden evolog commit to split at")
+ end
+
+ local function run(args)
+   flash("jj " .. table.concat(args, " "))
+   local _, command_err = jj(args)
+   if command_err then
+     error(command_err)
+   end
+ end
+
+ run({ "duplicate", "-r", change_id, "--insert-after", change_id })
+ run({ "restore", "--from", historical_commit, "--into", change_id, "--restore-descendants" })
+
+ jjui.builtin.revisions.evolog.cancel()
+ jjui.builtin.revisions.refresh()
+ """
+
+# Backwards compatibility
+[[actions]]
+name = "revisions.toggle_select"
+lua = """
+ jjui.builtin.revisions.toggle_select()
+ jjui.builtin.revisions.jump_to_parent()
+ """

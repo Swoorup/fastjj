@@ -19,12 +19,13 @@ use std::slice;
 use clap_complete::ArgValueCandidates;
 use itertools::Itertools as _;
 use jj_lib::op_walk;
+use pollster::FutureExt as _;
 
-use crate::cli_util::short_operation_hash;
 use crate::cli_util::CommandHelper;
+use crate::cli_util::short_operation_hash;
+use crate::command_error::CommandError;
 use crate::command_error::cli_error;
 use crate::command_error::user_error;
-use crate::command_error::CommandError;
 use crate::complete;
 use crate::ui::Ui;
 
@@ -37,8 +38,10 @@ use crate::ui::Ui;
 /// To discard recent operations, use `jj op restore <operation ID>` followed
 /// by `jj op abandon <operation ID>..@-`.
 ///
-/// The abandoned operations, commits, and other unreachable objects can later
-/// be garbage collected by using `jj util gc` command.
+/// Previous versions of a change (or predecessors) are also discarded if they
+/// become unreachable from the operation history. The abandoned operations,
+/// commits, and other unreachable objects can later be garbage collected by
+/// using `jj util gc` command.
 #[derive(clap::Args, Clone, Debug)]
 pub struct OperationAbandonArgs {
     /// The operation or operation range to abandon
@@ -126,7 +129,9 @@ pub fn cmd_op_abandon(
         stats.rewritten_count,
     )?;
     for (old, new_id) in reparented_head_ops().filter(|&(old, new_id)| old.id() != new_id) {
-        op_heads_store.update_op_heads(slice::from_ref(old.id()), new_id)?;
+        op_heads_store
+            .update_op_heads(slice::from_ref(old.id()), new_id)
+            .block_on()?;
     }
     // Remap the operation id of the current workspace. If there were any
     // divergent operations, user will need to re-abandon their ancestors.

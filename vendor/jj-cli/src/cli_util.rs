@@ -26,35 +26,33 @@ use std::io::Write as _;
 use std::mem;
 use std::path::Path;
 use std::path::PathBuf;
-use std::process::ExitCode;
 use std::rc::Rc;
-use std::str;
 use std::str::FromStr;
 use std::sync::Arc;
 use std::time::SystemTime;
 
 use bstr::ByteVec as _;
 use chrono::TimeZone as _;
+use clap::ArgAction;
+use clap::ArgMatches;
+use clap::Command;
+use clap::FromArgMatches as _;
 use clap::builder::MapValueParser;
 use clap::builder::NonEmptyStringValueParser;
 use clap::builder::TypedValueParser as _;
 use clap::builder::ValueParserFactory;
 use clap::error::ContextKind;
 use clap::error::ContextValue;
-use clap::ArgAction;
-use clap::ArgMatches;
-use clap::Command;
-use clap::FromArgMatches as _;
 use clap_complete::ArgValueCandidates;
 use clap_complete::ArgValueCompleter;
 use indexmap::IndexMap;
 use indexmap::IndexSet;
+use indoc::indoc;
 use indoc::writedoc;
 use itertools::Itertools as _;
 use jj_lib::backend::BackendResult;
 use jj_lib::backend::ChangeId;
 use jj_lib::backend::CommitId;
-use jj_lib::backend::MergedTreeId;
 use jj_lib::backend::TreeValue;
 use jj_lib::commit::Commit;
 use jj_lib::config::ConfigGetError;
@@ -71,7 +69,10 @@ use jj_lib::fileset::FilesetExpression;
 use jj_lib::gitignore::GitIgnoreError;
 use jj_lib::gitignore::GitIgnoreFile;
 use jj_lib::id_prefix::IdPrefixContext;
+use jj_lib::lock::FileLock;
 use jj_lib::matchers::Matcher;
+use jj_lib::matchers::NothingMatcher;
+use jj_lib::merge::Diff;
 use jj_lib::merge::MergedTreeValue;
 use jj_lib::merged_tree::MergedTree;
 use jj_lib::object_id::ObjectId as _;
@@ -84,9 +85,10 @@ use jj_lib::op_walk::OpsetEvaluationError;
 use jj_lib::operation::Operation;
 use jj_lib::ref_name::RefName;
 use jj_lib::ref_name::RefNameBuf;
+use jj_lib::ref_name::RemoteName;
+use jj_lib::ref_name::RemoteRefSymbol;
 use jj_lib::ref_name::WorkspaceName;
 use jj_lib::ref_name::WorkspaceNameBuf;
-use jj_lib::repo::merge_factories_map;
 use jj_lib::repo::CheckOutCommitError;
 use jj_lib::repo::EditCommitError;
 use jj_lib::repo::MutableRepo;
@@ -95,6 +97,7 @@ use jj_lib::repo::Repo;
 use jj_lib::repo::RepoLoader;
 use jj_lib::repo::StoreFactories;
 use jj_lib::repo::StoreLoadError;
+use jj_lib::repo::merge_factories_map;
 use jj_lib::repo_path::RepoPath;
 use jj_lib::repo_path::RepoPathBuf;
 use jj_lib::repo_path::RepoPathUiConverter;
@@ -116,20 +119,20 @@ use jj_lib::revset::UserRevsetExpression;
 use jj_lib::rewrite::restore_tree;
 use jj_lib::settings::HumanByteSize;
 use jj_lib::settings::UserSettings;
+use jj_lib::store::Store;
+use jj_lib::str_util::StringExpression;
+use jj_lib::str_util::StringMatcher;
 use jj_lib::str_util::StringPattern;
 use jj_lib::transaction::Transaction;
-use jj_lib::view::View;
 use jj_lib::working_copy;
-use jj_lib::working_copy::CheckoutOptions;
 use jj_lib::working_copy::CheckoutStats;
+use jj_lib::working_copy::LockedWorkingCopy;
 use jj_lib::working_copy::SnapshotOptions;
 use jj_lib::working_copy::SnapshotStats;
 use jj_lib::working_copy::UntrackedReason;
 use jj_lib::working_copy::WorkingCopy;
 use jj_lib::working_copy::WorkingCopyFactory;
 use jj_lib::working_copy::WorkingCopyFreshness;
-use jj_lib::workspace::default_working_copy_factories;
-use jj_lib::workspace::get_working_copy_factory;
 use jj_lib::workspace::DefaultWorkspaceLoaderFactory;
 use jj_lib::workspace::LockedWorkspace;
 use jj_lib::workspace::WorkingCopyFactories;
@@ -137,10 +140,14 @@ use jj_lib::workspace::Workspace;
 use jj_lib::workspace::WorkspaceLoadError;
 use jj_lib::workspace::WorkspaceLoader;
 use jj_lib::workspace::WorkspaceLoaderFactory;
+use jj_lib::workspace::default_working_copy_factories;
+use jj_lib::workspace::get_working_copy_factory;
+use pollster::FutureExt as _;
 use tracing::instrument;
 use tracing_chrome::ChromeLayerBuilder;
 use tracing_subscriber::prelude::*;
 
+use crate::command_error::CommandError;
 use crate::command_error::cli_error;
 use crate::command_error::config_error_with_message;
 use crate::command_error::handle_command_result;
@@ -149,16 +156,15 @@ use crate::command_error::internal_error_with_message;
 use crate::command_error::print_parse_diagnostics;
 use crate::command_error::user_error;
 use crate::command_error::user_error_with_hint;
-use crate::command_error::CommandError;
+use crate::command_error::user_error_with_message;
 use crate::commit_templater::CommitTemplateLanguage;
 use crate::commit_templater::CommitTemplateLanguageExtension;
-use crate::commit_templater::CommitTemplatePropertyKind;
 use crate::complete;
-use crate::config::config_from_environment;
-use crate::config::parse_config_args;
 use crate::config::ConfigArgKind;
 use crate::config::ConfigEnv;
 use crate::config::RawConfig;
+use crate::config::config_from_environment;
+use crate::config::parse_config_args;
 use crate::description_util::TextEditor;
 use crate::diff_util;
 use crate::diff_util::DiffFormat;
@@ -166,26 +172,26 @@ use crate::diff_util::DiffFormatArgs;
 use crate::diff_util::DiffRenderer;
 use crate::formatter::FormatRecorder;
 use crate::formatter::Formatter;
-use crate::formatter::PlainTextFormatter;
+use crate::formatter::FormatterExt as _;
 use crate::merge_tools::DiffEditor;
 use crate::merge_tools::MergeEditor;
 use crate::merge_tools::MergeToolConfigError;
 use crate::operation_templater::OperationTemplateLanguage;
 use crate::operation_templater::OperationTemplateLanguageExtension;
-use crate::operation_templater::OperationTemplatePropertyKind;
 use crate::revset_util;
 use crate::revset_util::RevsetExpressionEvaluator;
+use crate::revset_util::parse_union_name_patterns;
 use crate::template_builder;
 use crate::template_builder::TemplateLanguage;
 use crate::template_parser::TemplateAliasesMap;
 use crate::template_parser::TemplateDiagnostics;
-use crate::templater::BoxedTemplateProperty;
 use crate::templater::TemplateRenderer;
+use crate::templater::WrapTemplateProperty;
 use crate::text_util;
 use crate::ui::ColorChoice;
 use crate::ui::Ui;
 
-const SHORT_CHANGE_ID_TEMPLATE_TEXT: &str = "format_short_change_id(self.change_id())";
+const SHORT_CHANGE_ID_TEMPLATE_TEXT: &str = "format_short_change_id_with_change_offset(self)";
 
 #[derive(Clone)]
 struct ChromeTracingFlushGuard {
@@ -193,7 +199,7 @@ struct ChromeTracingFlushGuard {
 }
 
 impl Debug for ChromeTracingFlushGuard {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+    fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
         let Self { _inner } = self;
         f.debug_struct("ChromeTracingFlushGuard")
             .finish_non_exhaustive()
@@ -211,7 +217,7 @@ pub struct TracingSubscription {
 }
 
 impl TracingSubscription {
-    const ENV_VAR_NAME: &'static str = "JJ_LOG";
+    const ENV_VAR_NAME: &str = "JJ_LOG";
 
     /// Initializes tracing with the default configuration. This should be
     /// called as early as possible.
@@ -258,7 +264,7 @@ impl TracingSubscription {
             )
             .with(chrome_tracing_layer)
             .init();
-        TracingSubscription {
+        Self {
             reload_log_filter,
             _chrome_tracing_flush_guard: chrome_tracing_flush_guard,
         }
@@ -363,6 +369,8 @@ impl CommandHelper {
         let repo_path = workspace_root.join(".jj").join("repo");
         config_env.reset_repo_path(&repo_path);
         config_env.reload_repo_config(&mut raw_config)?;
+        config_env.reset_workspace_path(workspace_root);
+        config_env.reload_workspace_config(&mut raw_config)?;
         let mut config = config_env.resolve_config(&raw_config)?;
         // No migration messages here, which would usually be emitted before.
         jj_lib::config::migrate(&mut config, &self.data.config_migrations)?;
@@ -383,22 +391,21 @@ impl CommandHelper {
     /// This function also loads template aliases from the settings. Use
     /// `WorkspaceCommandHelper::parse_template()` if you've already
     /// instantiated the workspace helper.
-    pub fn parse_template<'a, C: Clone + 'a, L: TemplateLanguage<'a> + ?Sized>(
+    pub fn parse_template<'a, C, L>(
         &self,
         ui: &Ui,
         language: &L,
         template_text: &str,
-        wrap_self: impl Fn(BoxedTemplateProperty<'a, C>) -> L::Property,
-    ) -> Result<TemplateRenderer<'a, C>, CommandError> {
+    ) -> Result<TemplateRenderer<'a, C>, CommandError>
+    where
+        C: Clone + 'a,
+        L: TemplateLanguage<'a> + ?Sized,
+        L::Property: WrapTemplateProperty<'a, C>,
+    {
         let mut diagnostics = TemplateDiagnostics::new();
         let aliases = load_template_aliases(ui, self.settings().config())?;
-        let template = template_builder::parse(
-            language,
-            &mut diagnostics,
-            template_text,
-            &aliases,
-            wrap_self,
-        )?;
+        let template =
+            template_builder::parse(language, &mut diagnostics, template_text, &aliases)?;
         print_parse_diagnostics(ui, "In template expression", &diagnostics)?;
         Ok(template)
     }
@@ -535,13 +542,14 @@ impl CommandHelper {
             Ok(op) => {
                 let repo = workspace.repo_loader().load_at(&op)?;
                 let mut workspace_command = self.for_workable_repo(ui, workspace, repo)?;
+                workspace_command.check_working_copy_writable()?;
 
                 // Snapshot the current working copy on top of the last known working-copy
                 // operation, then merge the divergent operations. The wc_commit_id of the
                 // merged repo wouldn't change because the old one wins, but it's probably
                 // fine if we picked the new wc_commit_id.
-                let stats = workspace_command
-                    .maybe_snapshot_impl(ui)
+                let stale_stats = workspace_command
+                    .snapshot_working_copy(ui)
                     .map_err(|err| err.into_command_error())?;
 
                 let wc_commit_id = workspace_command.get_wc_commit_id().unwrap();
@@ -549,7 +557,6 @@ impl CommandHelper {
                 let stale_wc_commit = repo.store().get_commit(wc_commit_id)?;
 
                 let mut workspace_command = self.workspace_helper_no_snapshot(ui)?;
-                let checkout_options = workspace_command.checkout_options();
 
                 let repo = workspace_command.repo().clone();
                 let (mut locked_ws, desired_wc_commit) =
@@ -560,6 +567,7 @@ impl CommandHelper {
                     &repo,
                 )? {
                     WorkingCopyFreshness::Fresh | WorkingCopyFreshness::Updated(_) => {
+                        drop(locked_ws);
                         writeln!(
                             ui.status(),
                             "Attempted recovery, but the working copy is not stale"
@@ -572,7 +580,6 @@ impl CommandHelper {
                             repo.op_id().clone(),
                             &stale_wc_commit,
                             &desired_wc_commit,
-                            &checkout_options,
                         )?;
                         workspace_command.print_updated_working_copy_stats(
                             ui,
@@ -586,9 +593,23 @@ impl CommandHelper {
                             short_commit_hash(desired_wc_commit.id())
                         )?;
                     }
-                };
+                }
 
-                Ok((workspace_command, stats))
+                // There may be Git refs to import, so snapshot again. Git HEAD
+                // will also be imported if it was updated after the working
+                // copy became stale. The result wouldn't be ideal, but there
+                // should be no data loss at least.
+                let fresh_stats = workspace_command
+                    .maybe_snapshot_impl(ui)
+                    .map_err(|err| err.into_command_error())?;
+                let merged_stats = {
+                    let SnapshotStats {
+                        mut untracked_paths,
+                    } = stale_stats;
+                    untracked_paths.extend(fresh_stats.untracked_paths);
+                    SnapshotStats { untracked_paths }
+                };
+                Ok((workspace_command, merged_stats))
             }
             Err(e @ OpStoreError::ObjectNotFound { .. }) => {
                 writeln!(
@@ -721,61 +742,35 @@ pub struct AdvanceableBookmark {
     old_commit_id: CommitId,
 }
 
-/// Helper for parsing and evaluating settings for the advance-bookmarks
-/// feature. Settings are configured in the jj config.toml as lists of
-/// [`StringPattern`]s for enabled and disabled bookmarks. Example:
+/// Parses advance-bookmarks settings into matcher.
+///
+/// Settings are configured in the jj config.toml as lists of string matcher
+/// expressions for enabled and disabled bookmarks. Example:
 /// ```toml
 /// [experimental-advance-branches]
 /// # Enable the feature for all branches except "main".
-/// enabled-branches = ["glob:*"]
+/// enabled-branches = ["*"]
 /// disabled-branches = ["main"]
 /// ```
-struct AdvanceBookmarksSettings {
-    enabled_bookmarks: Vec<StringPattern>,
-    disabled_bookmarks: Vec<StringPattern>,
-}
-
-impl AdvanceBookmarksSettings {
-    fn from_settings(settings: &UserSettings) -> Result<Self, CommandError> {
-        let get_setting = |setting_key| {
-            let name = ConfigNamePathBuf::from_iter(["experimental-advance-branches", setting_key]);
-            match settings.get::<Vec<String>>(&name).optional()? {
-                Some(patterns) => patterns
-                    .into_iter()
-                    .map(|s| {
-                        StringPattern::parse(&s).map_err(|e| {
-                            config_error_with_message(format!("Error parsing `{s}` for {name}"), e)
-                        })
-                    })
-                    .collect(),
-                None => Ok(Vec::new()),
-            }
-        };
-        Ok(Self {
-            enabled_bookmarks: get_setting("enabled-branches")?,
-            disabled_bookmarks: get_setting("disabled-branches")?,
-        })
-    }
-
-    /// Returns true if the advance-bookmarks feature is enabled for
-    /// `bookmark_name`.
-    fn bookmark_is_eligible(&self, bookmark_name: &RefName) -> bool {
-        if self
-            .disabled_bookmarks
-            .iter()
-            .any(|d| d.matches(bookmark_name.as_str()))
-        {
-            return false;
-        }
-        self.enabled_bookmarks
-            .iter()
-            .any(|e| e.matches(bookmark_name.as_str()))
-    }
-
-    /// Returns true if the config includes at least one "enabled-branches"
-    /// pattern.
-    fn feature_enabled(&self) -> bool {
-        !self.enabled_bookmarks.is_empty()
+fn load_advance_bookmarks_matcher(
+    ui: &Ui,
+    settings: &UserSettings,
+) -> Result<Option<StringMatcher>, CommandError> {
+    let get_setting = |setting_key: &str| -> Result<Vec<String>, _> {
+        let name = ConfigNamePathBuf::from_iter(["experimental-advance-branches", setting_key]);
+        settings.get(&name)
+    };
+    // TODO: When we stabilize this feature, enabled/disabled patterns can be
+    // combined into a single matcher expression.
+    let enabled_names = get_setting("enabled-branches")?;
+    let disabled_names = get_setting("disabled-branches")?;
+    let enabled_expr = parse_union_name_patterns(ui, &enabled_names)?;
+    let disabled_expr = parse_union_name_patterns(ui, &disabled_names)?;
+    if enabled_names.is_empty() {
+        Ok(None)
+    } else {
+        let expr = enabled_expr.intersection(disabled_expr.negated());
+        Ok(Some(expr.to_matcher()))
     }
 }
 
@@ -785,10 +780,12 @@ pub struct WorkspaceCommandEnvironment {
     settings: UserSettings,
     revset_aliases_map: RevsetAliasesMap,
     template_aliases_map: TemplateAliasesMap,
+    default_ignored_remote: Option<&'static RemoteName>,
+    revsets_use_glob_by_default: bool,
     path_converter: RepoPathUiConverter,
     workspace_name: WorkspaceNameBuf,
-    immutable_heads_expression: Rc<UserRevsetExpression>,
-    short_prefixes_expression: Option<Rc<UserRevsetExpression>>,
+    immutable_heads_expression: Arc<UserRevsetExpression>,
+    short_prefixes_expression: Option<Arc<UserRevsetExpression>>,
     conflict_marker_style: ConflictMarkerStyle,
 }
 
@@ -798,6 +795,7 @@ impl WorkspaceCommandEnvironment {
         let settings = workspace.settings();
         let revset_aliases_map = revset_util::load_revset_aliases(ui, settings.config())?;
         let template_aliases_map = load_template_aliases(ui, settings.config())?;
+        let default_ignored_remote = default_ignored_remote_name(workspace.repo_loader().store());
         let path_converter = RepoPathUiConverter::Fs {
             cwd: command.cwd().to_owned(),
             base: workspace.workspace_root().to_owned(),
@@ -807,6 +805,8 @@ impl WorkspaceCommandEnvironment {
             settings: settings.clone(),
             revset_aliases_map,
             template_aliases_map,
+            default_ignored_remote,
+            revsets_use_glob_by_default: settings.get("ui.revsets-use-glob-by-default")?,
             path_converter,
             workspace_name: workspace.workspace_name().to_owned(),
             immutable_heads_expression: RevsetExpression::root(),
@@ -826,7 +826,7 @@ impl WorkspaceCommandEnvironment {
         &self.workspace_name
     }
 
-    pub(crate) fn revset_parse_context(&self) -> RevsetParseContext {
+    pub(crate) fn revset_parse_context(&self) -> RevsetParseContext<'_> {
         let workspace_context = RevsetWorkspaceContext {
             path_converter: &self.path_converter,
             workspace_name: &self.workspace_name,
@@ -843,6 +843,8 @@ impl WorkspaceCommandEnvironment {
             local_variables: HashMap::new(),
             user_email: self.settings.user_email(),
             date_pattern_context: now.into(),
+            default_ignored_remote: self.default_ignored_remote,
+            use_glob_by_default: self.revsets_use_glob_by_default,
             extensions: self.command.revset_extensions(),
             workspace: Some(workspace_context),
         }
@@ -859,14 +861,14 @@ impl WorkspaceCommandEnvironment {
     }
 
     /// User-configured expression defining the immutable set.
-    pub fn immutable_expression(&self) -> Rc<UserRevsetExpression> {
+    pub fn immutable_expression(&self) -> Arc<UserRevsetExpression> {
         // Negated ancestors expression `~::(<heads> | root())` is slightly
         // easier to optimize than negated union `~(::<heads> | root())`.
         self.immutable_heads_expression.ancestors()
     }
 
     /// User-configured expression defining the heads of the immutable set.
-    pub fn immutable_heads_expression(&self) -> &Rc<UserRevsetExpression> {
+    pub fn immutable_heads_expression(&self) -> &Arc<UserRevsetExpression> {
         &self.immutable_heads_expression
     }
 
@@ -878,7 +880,7 @@ impl WorkspaceCommandEnvironment {
     fn load_immutable_heads_expression(
         &self,
         ui: &Ui,
-    ) -> Result<Rc<UserRevsetExpression>, CommandError> {
+    ) -> Result<Arc<UserRevsetExpression>, CommandError> {
         let mut diagnostics = RevsetDiagnostics::new();
         let expression = revset_util::parse_immutable_heads_expression(
             &mut diagnostics,
@@ -892,7 +894,7 @@ impl WorkspaceCommandEnvironment {
     fn load_short_prefixes_expression(
         &self,
         ui: &Ui,
-    ) -> Result<Option<Rc<UserRevsetExpression>>, CommandError> {
+    ) -> Result<Option<Arc<UserRevsetExpression>>, CommandError> {
         let revset_string = self
             .settings
             .get_string("revsets.short-prefixes")
@@ -914,53 +916,36 @@ impl WorkspaceCommandEnvironment {
         }
     }
 
-    /// Returns first immutable commit + lower and upper bounds on number of
-    /// immutable commits.
-    fn find_immutable_commit<'a>(
+    /// Returns first immutable commit.
+    fn find_immutable_commit(
         &self,
         repo: &dyn Repo,
-        commits: impl IntoIterator<Item = &'a CommitId>,
-    ) -> Result<Option<(CommitId, usize, Option<usize>)>, CommandError> {
-        if self.command.global_args().ignore_immutable {
-            let root_id = repo.store().root_commit_id();
-            return Ok(commits
-                .into_iter()
-                .find(|id| *id == root_id)
-                .map(|root| (root.clone(), 1, None)));
-        }
+        to_rewrite_expr: &Arc<ResolvedRevsetExpression>,
+    ) -> Result<Option<CommitId>, CommandError> {
+        let immutable_expression = if self.command.global_args().ignore_immutable {
+            UserRevsetExpression::root()
+        } else {
+            self.immutable_expression()
+        };
 
         // Not using self.id_prefix_context() because the disambiguation data
         // must not be calculated and cached against arbitrary repo. It's also
         // unlikely that the immutable expression contains short hashes.
         let id_prefix_context = IdPrefixContext::new(self.command.revset_extensions().clone());
-        let to_rewrite_revset =
-            RevsetExpression::commits(commits.into_iter().cloned().collect_vec());
-        let mut expression = RevsetExpressionEvaluator::new(
+        let immutable_expr = RevsetExpressionEvaluator::new(
             repo,
             self.command.revset_extensions().clone(),
             &id_prefix_context,
-            self.immutable_expression(),
-        );
-        expression.intersect_with(&to_rewrite_revset);
+            immutable_expression,
+        )
+        .resolve()
+        .map_err(|e| config_error_with_message("Invalid `revset-aliases.immutable_heads()`", e))?;
 
-        let mut commit_id_iter = expression.evaluate_to_commit_ids().map_err(|e| {
-            config_error_with_message("Invalid `revset-aliases.immutable_heads()`", e)
-        })?;
-
-        let Some(first_immutable) = commit_id_iter.next().transpose()? else {
-            return Ok(None);
-        };
-
-        let mut bounds = RevsetExpressionEvaluator::new(
-            repo,
-            self.command.revset_extensions().clone(),
-            &id_prefix_context,
-            self.immutable_expression(),
-        );
-        bounds.intersect_with(&to_rewrite_revset.descendants());
-        let (lower, upper) = bounds.evaluate()?.count_estimate()?;
-
-        Ok(Some((first_immutable, lower, upper)))
+        let mut commit_id_iter = immutable_expr
+            .intersection(to_rewrite_expr)
+            .evaluate(repo)?
+            .iter();
+        Ok(commit_id_iter.next().transpose()?)
     }
 
     pub fn template_aliases_map(&self) -> &TemplateAliasesMap {
@@ -968,23 +953,23 @@ impl WorkspaceCommandEnvironment {
     }
 
     /// Parses template of the given language into evaluation tree.
-    ///
-    /// `wrap_self` specifies the type of the top-level property, which should
-    /// be one of the `L::wrap_*()` functions.
-    pub fn parse_template<'a, C: Clone + 'a, L: TemplateLanguage<'a> + ?Sized>(
+    pub fn parse_template<'a, C, L>(
         &self,
         ui: &Ui,
         language: &L,
         template_text: &str,
-        wrap_self: impl Fn(BoxedTemplateProperty<'a, C>) -> L::Property,
-    ) -> Result<TemplateRenderer<'a, C>, CommandError> {
+    ) -> Result<TemplateRenderer<'a, C>, CommandError>
+    where
+        C: Clone + 'a,
+        L: TemplateLanguage<'a> + ?Sized,
+        L::Property: WrapTemplateProperty<'a, C>,
+    {
         let mut diagnostics = TemplateDiagnostics::new();
         let template = template_builder::parse(
             language,
             &mut diagnostics,
             template_text,
             &self.template_aliases_map,
-            wrap_self,
         )?;
         print_parse_diagnostics(ui, "In template expression", &diagnostics)?;
         Ok(template)
@@ -1012,6 +997,13 @@ impl WorkspaceCommandEnvironment {
     pub fn operation_template_extensions(&self) -> &[Arc<dyn OperationTemplateLanguageExtension>] {
         &self.command.data.operation_template_extensions
     }
+}
+
+/// A token that holds a lock for git import/export operations in colocated
+/// repositories. For non-colocated repos, this is an empty token (no actual
+/// lock held). The lock is automatically released when this token is dropped.
+pub struct GitImportExportLock {
+    _lock: Option<FileLock>,
 }
 
 /// Provides utilities for writing a command that works on a [`Workspace`]
@@ -1103,6 +1095,22 @@ impl WorkspaceCommandHelper {
         }
     }
 
+    /// Acquires a lock for git import/export operations if the workspace is
+    /// colocated with Git. Returns a token that can be passed to functions
+    /// that need to import from or export to Git. For non-colocated repos,
+    /// returns a token with no lock inside.
+    fn lock_git_import_export(&self) -> Result<GitImportExportLock, CommandError> {
+        let lock = if self.working_copy_shared_with_git {
+            let lock_path = self.workspace.repo_path().join("git_import_export.lock");
+            Some(FileLock::lock(lock_path.clone()).map_err(|err| {
+                user_error_with_message("Failed to take lock for Git import/export", err)
+            })?)
+        } else {
+            None
+        };
+        Ok(GitImportExportLock { _lock: lock })
+    }
+
     /// Note that unless you have a good reason not to do so, you should always
     /// call [`print_snapshot_stats`] with the [`SnapshotStats`] returned by
     /// this function to present possible untracked files to the user.
@@ -1112,9 +1120,38 @@ impl WorkspaceCommandHelper {
             return Ok(SnapshotStats::default());
         }
 
+        // Acquire git import/export lock once for the entire import/snapshot/export
+        // cycle. This prevents races with other processes during Git HEAD and
+        // refs import/export.
+        #[cfg_attr(not(feature = "git"), allow(unused_variables))]
+        let git_import_export_lock = self
+            .lock_git_import_export()
+            .map_err(snapshot_command_error)?;
+
+        // Reload at current head to avoid creating divergent operations if another
+        // process committed an operation while we were waiting for the lock.
+        if self.working_copy_shared_with_git {
+            let repo = self.repo().clone();
+            let op_heads_store = repo.loader().op_heads_store();
+            let op_heads = op_heads_store
+                .get_op_heads()
+                .block_on()
+                .map_err(snapshot_command_error)?;
+            if std::slice::from_ref(repo.op_id()) != op_heads {
+                let op = self
+                    .env
+                    .command
+                    .resolve_operation(ui, repo.loader())
+                    .map_err(snapshot_command_error)?;
+                let current_repo = repo.loader().load_at(&op).map_err(snapshot_command_error)?;
+                self.user_repo = ReadonlyUserRepo::new(current_repo);
+            }
+        }
+
         #[cfg(feature = "git")]
         if self.working_copy_shared_with_git {
-            self.import_git_head(ui).map_err(snapshot_command_error)?;
+            self.import_git_head(ui, &git_import_export_lock)
+                .map_err(snapshot_command_error)?;
         }
         // Because the Git refs (except HEAD) aren't imported yet, the ref
         // pointing to the new working-copy commit might not be exported.
@@ -1125,7 +1162,8 @@ impl WorkspaceCommandHelper {
         // import_git_refs() can rebase the working-copy commit.
         #[cfg(feature = "git")]
         if self.working_copy_shared_with_git {
-            self.import_git_refs(ui).map_err(snapshot_command_error)?;
+            self.import_git_refs(ui, &git_import_export_lock)
+                .map_err(snapshot_command_error)?;
         }
         Ok(stats)
     }
@@ -1149,7 +1187,11 @@ impl WorkspaceCommandHelper {
     /// working-copy contents won't be updated.
     #[cfg(feature = "git")]
     #[instrument(skip_all)]
-    fn import_git_head(&mut self, ui: &Ui) -> Result<(), CommandError> {
+    fn import_git_head(
+        &mut self,
+        ui: &Ui,
+        git_import_export_lock: &GitImportExportLock,
+    ) -> Result<(), CommandError> {
         assert!(self.may_update_working_copy);
         let mut tx = self.start_transaction();
         jj_lib::git::import_head(tx.repo_mut())?;
@@ -1157,29 +1199,20 @@ impl WorkspaceCommandHelper {
             return Ok(());
         }
 
-        // TODO: There are various ways to get duplicated working-copy
-        // commits. Some of them could be mitigated by checking the working-copy
-        // operation id after acquiring the lock, but that isn't enough.
-        //
-        // - moved HEAD was observed by multiple jj processes, and new working-copy
-        //   commits are created concurrently.
-        // - new HEAD was exported by jj, but the operation isn't committed yet.
-        // - new HEAD was exported by jj, but the new working-copy commit isn't checked
-        //   out yet.
-
         let mut tx = tx.into_inner();
         let old_git_head = self.repo().view().git_head().clone();
         let new_git_head = tx.repo().view().git_head().clone();
         if let Some(new_git_head_id) = new_git_head.as_normal() {
             let workspace_name = self.workspace_name().to_owned();
             let new_git_head_commit = tx.repo().store().get_commit(new_git_head_id)?;
-            tx.repo_mut()
+            let wc_commit = tx
+                .repo_mut()
                 .check_out(workspace_name, &new_git_head_commit)?;
             let mut locked_ws = self.workspace.start_working_copy_mutation()?;
             // The working copy was presumably updated by the git command that updated
             // HEAD, so we just need to reset our working copy
             // state to it without updating working copy files.
-            locked_ws.locked_wc().reset(&new_git_head_commit)?;
+            locked_ws.locked_wc().reset(&wc_commit).block_on()?;
             tx.repo_mut().rebase_descendants()?;
             self.user_repo = ReadonlyUserRepo::new(tx.commit("import git head")?);
             locked_ws.finish(self.user_repo.repo.op_id().clone())?;
@@ -1193,7 +1226,7 @@ impl WorkspaceCommandHelper {
             }
         } else {
             // Unlikely, but the HEAD ref got deleted by git?
-            self.finish_transaction(ui, tx, "import git head")?;
+            self.finish_transaction(ui, tx, "import git head", git_import_export_lock)?;
         }
         Ok(())
     }
@@ -1208,10 +1241,18 @@ impl WorkspaceCommandHelper {
     /// the working copy parent if the repository is colocated.
     #[cfg(feature = "git")]
     #[instrument(skip_all)]
-    fn import_git_refs(&mut self, ui: &Ui) -> Result<(), CommandError> {
-        let git_settings = self.settings().git_settings()?;
+    fn import_git_refs(
+        &mut self,
+        ui: &Ui,
+        git_import_export_lock: &GitImportExportLock,
+    ) -> Result<(), CommandError> {
+        use jj_lib::git;
+        let git_settings = git::GitSettings::from_settings(self.settings())?;
+        let remote_settings = self.settings().remote_settings()?;
+        let import_options =
+            crate::git_util::load_git_import_options(ui, &git_settings, &remote_settings)?;
         let mut tx = self.start_transaction();
-        let stats = jj_lib::git::import_refs(tx.repo_mut(), &git_settings)?;
+        let stats = git::import_refs(tx.repo_mut(), &import_options)?;
         crate::git_util::print_git_import_stats(ui, tx.repo(), &stats, false)?;
         if !tx.repo().has_changes() {
             return Ok(());
@@ -1226,7 +1267,7 @@ impl WorkspaceCommandHelper {
                 "Rebased {num_rebased} descendant commits off of commits rewritten from git"
             )?;
         }
-        self.finish_transaction(ui, tx, "import git refs")?;
+        self.finish_transaction(ui, tx, "import git refs", git_import_export_lock)?;
         writeln!(
             ui.status(),
             "Done importing changes from the underlying Git repo."
@@ -1254,15 +1295,9 @@ impl WorkspaceCommandHelper {
         &self.env
     }
 
-    pub fn checkout_options(&self) -> CheckoutOptions {
-        CheckoutOptions {
-            conflict_marker_style: self.env.conflict_marker_style(),
-        }
-    }
-
     pub fn unchecked_start_working_copy_mutation(
         &mut self,
-    ) -> Result<(LockedWorkspace, Commit), CommandError> {
+    ) -> Result<(LockedWorkspace<'_>, Commit), CommandError> {
         self.check_working_copy_writable()?;
         let wc_commit = if let Some(wc_commit_id) = self.get_wc_commit_id() {
             self.repo().store().get_commit(wc_commit_id)?
@@ -1277,9 +1312,11 @@ impl WorkspaceCommandHelper {
 
     pub fn start_working_copy_mutation(
         &mut self,
-    ) -> Result<(LockedWorkspace, Commit), CommandError> {
+    ) -> Result<(LockedWorkspace<'_>, Commit), CommandError> {
         let (mut locked_ws, wc_commit) = self.unchecked_start_working_copy_mutation()?;
-        if wc_commit.tree_id() != locked_ws.locked_wc().old_tree_id() {
+        if wc_commit.tree().tree_ids_and_labels()
+            != locked_ws.locked_wc().old_tree().tree_ids_and_labels()
+        {
             return Err(user_error("Concurrent working copy operation. Try again."));
         }
         Ok((locked_ws, wc_commit))
@@ -1396,21 +1433,18 @@ to the current parents may contain changes from multiple commits.
         start_tracking_matcher: &'a dyn Matcher,
     ) -> Result<SnapshotOptions<'a>, CommandError> {
         let base_ignores = self.base_ignores()?;
-        let fsmonitor_settings = self.settings().fsmonitor_settings()?;
         let HumanByteSize(mut max_new_file_size) = self
             .settings()
             .get_value_with("snapshot.max-new-file-size", TryInto::try_into)?;
         if max_new_file_size == 0 {
             max_new_file_size = u64::MAX;
         }
-        let conflict_marker_style = self.env.conflict_marker_style();
         Ok(SnapshotOptions {
             base_ignores,
-            fsmonitor_settings,
             progress: None,
             start_tracking_matcher,
+            force_tracking_matcher: &NothingMatcher,
             max_new_file_size,
-            conflict_marker_style,
         })
     }
 
@@ -1442,10 +1476,10 @@ to the current parents may contain changes from multiple commits.
         };
 
         fn xdg_config_home() -> Result<PathBuf, std::env::VarError> {
-            if let Ok(x) = std::env::var("XDG_CONFIG_HOME") {
-                if !x.is_empty() {
-                    return Ok(PathBuf::from(x));
-                }
+            if let Ok(x) = std::env::var("XDG_CONFIG_HOME")
+                && !x.is_empty()
+            {
+                return Ok(PathBuf::from(x));
             }
             std::env::var("HOME").map(|x| Path::new(&x).join(".config"))
         }
@@ -1458,10 +1492,10 @@ to the current parents may contain changes from multiple commits.
             }
             git_ignores = git_ignores
                 .chain_with_file("", git_backend.git_repo_path().join("info").join("exclude"))?;
-        } else if let Ok(git_config) = gix::config::File::from_globals() {
-            if let Some(excludes_file_path) = get_excludes_file_path(&git_config) {
-                git_ignores = git_ignores.chain_with_file("", excludes_file_path)?;
-            }
+        } else if let Ok(git_config) = gix::config::File::from_globals()
+            && let Some(excludes_file_path) = get_excludes_file_path(&git_config)
+        {
+            git_ignores = git_ignores.chain_with_file("", excludes_file_path)?;
         }
         Ok(git_ignores)
     }
@@ -1583,21 +1617,14 @@ to the current parents may contain changes from multiple commits.
         revision_arg: &RevisionArg,
     ) -> Result<Commit, CommandError> {
         let expression = self.parse_revset(ui, revision_arg)?;
-        let should_hint_about_all_prefix = false;
-        revset_util::evaluate_revset_to_single_commit(
-            revision_arg.as_ref(),
-            &expression,
-            || self.commit_summary_template(),
-            should_hint_about_all_prefix,
-        )
+        revset_util::evaluate_revset_to_single_commit(revision_arg.as_ref(), &expression, || {
+            self.commit_summary_template()
+        })
     }
 
-    /// Evaluates revset expressions to non-empty set of commit IDs. The
+    /// Evaluates revset expressions to set of commit IDs. The
     /// returned set preserves the order of the input expressions.
-    ///
-    /// If an input expression is prefixed with `all:`, it may be evaluated to
-    /// any number of revisions (including 0.)
-    pub fn resolve_some_revsets_default_single(
+    pub fn resolve_revsets_ordered(
         &self,
         ui: &Ui,
         revision_args: &[RevisionArg],
@@ -1614,12 +1641,10 @@ to the current parents may contain changes from multiple commits.
                     all_commits.insert(commit_id?);
                 }
             } else {
-                let should_hint_about_all_prefix = true;
                 let commit = revset_util::evaluate_revset_to_single_commit(
                     revision_arg.as_ref(),
                     &expression,
                     || self.commit_summary_template(),
-                    should_hint_about_all_prefix,
                 )?;
                 if !all_commits.insert(commit.id().clone()) {
                     let commit_hash = short_commit_hash(commit.id());
@@ -1629,6 +1654,17 @@ to the current parents may contain changes from multiple commits.
                 }
             }
         }
+        Ok(all_commits)
+    }
+
+    /// Evaluates revset expressions to non-empty set of commit IDs. The
+    /// returned set preserves the order of the input expressions.
+    pub fn resolve_some_revsets(
+        &self,
+        ui: &Ui,
+        revision_args: &[RevisionArg],
+    ) -> Result<IndexSet<CommitId>, CommandError> {
+        let all_commits = self.resolve_revsets_ordered(ui, revision_args)?;
         if all_commits.is_empty() {
             Err(user_error("Empty revision set"))
         } else {
@@ -1681,7 +1717,7 @@ to the current parents may contain changes from multiple commits.
 
     pub fn attach_revset_evaluator(
         &self,
-        expression: Rc<UserRevsetExpression>,
+        expression: Arc<UserRevsetExpression>,
     ) -> RevsetExpressionEvaluator<'_> {
         RevsetExpressionEvaluator::new(
             self.repo().as_ref(),
@@ -1698,33 +1734,36 @@ to the current parents may contain changes from multiple commits.
     }
 
     /// Parses template of the given language into evaluation tree.
-    ///
-    /// `wrap_self` specifies the type of the top-level property, which should
-    /// be one of the `L::wrap_*()` functions.
-    pub fn parse_template<'a, C: Clone + 'a, L: TemplateLanguage<'a> + ?Sized>(
+    pub fn parse_template<'a, C, L>(
         &self,
         ui: &Ui,
         language: &L,
         template_text: &str,
-        wrap_self: impl Fn(BoxedTemplateProperty<'a, C>) -> L::Property,
-    ) -> Result<TemplateRenderer<'a, C>, CommandError> {
-        self.env
-            .parse_template(ui, language, template_text, wrap_self)
+    ) -> Result<TemplateRenderer<'a, C>, CommandError>
+    where
+        C: Clone + 'a,
+        L: TemplateLanguage<'a> + ?Sized,
+        L::Property: WrapTemplateProperty<'a, C>,
+    {
+        self.env.parse_template(ui, language, template_text)
     }
 
     /// Parses template that is validated by `Self::new()`.
-    fn reparse_valid_template<'a, C: Clone + 'a, L: TemplateLanguage<'a> + ?Sized>(
+    fn reparse_valid_template<'a, C, L>(
         &self,
         language: &L,
         template_text: &str,
-        wrap_self: impl Fn(BoxedTemplateProperty<'a, C>) -> L::Property,
-    ) -> TemplateRenderer<'a, C> {
+    ) -> TemplateRenderer<'a, C>
+    where
+        C: Clone + 'a,
+        L: TemplateLanguage<'a> + ?Sized,
+        L::Property: WrapTemplateProperty<'a, C>,
+    {
         template_builder::parse(
             language,
             &mut TemplateDiagnostics::new(),
             template_text,
             &self.env.template_aliases_map,
-            wrap_self,
         )
         .expect("parse error should be confined by WorkspaceCommandHelper::new()")
     }
@@ -1736,12 +1775,7 @@ to the current parents may contain changes from multiple commits.
         template_text: &str,
     ) -> Result<TemplateRenderer<'_, Commit>, CommandError> {
         let language = self.commit_template_language();
-        self.parse_template(
-            ui,
-            &language,
-            template_text,
-            CommitTemplatePropertyKind::wrap_commit,
-        )
+        self.parse_template(ui, &language, template_text)
     }
 
     /// Parses commit template into evaluation tree.
@@ -1751,12 +1785,7 @@ to the current parents may contain changes from multiple commits.
         template_text: &str,
     ) -> Result<TemplateRenderer<'_, Operation>, CommandError> {
         let language = self.operation_template_language();
-        self.parse_template(
-            ui,
-            &language,
-            template_text,
-            OperationTemplatePropertyKind::wrap_operation,
-        )
+        self.parse_template(ui, &language, template_text)
     }
 
     /// Creates commit template language environment for this workspace.
@@ -1777,31 +1806,21 @@ to the current parents may contain changes from multiple commits.
     /// Template for one-line summary of a commit.
     pub fn commit_summary_template(&self) -> TemplateRenderer<'_, Commit> {
         let language = self.commit_template_language();
-        self.reparse_valid_template(
-            &language,
-            &self.commit_summary_template_text,
-            CommitTemplatePropertyKind::wrap_commit,
-        )
+        self.reparse_valid_template(&language, &self.commit_summary_template_text)
+            .labeled(["commit"])
     }
 
     /// Template for one-line summary of an operation.
     pub fn operation_summary_template(&self) -> TemplateRenderer<'_, Operation> {
         let language = self.operation_template_language();
-        self.reparse_valid_template(
-            &language,
-            &self.op_summary_template_text,
-            OperationTemplatePropertyKind::wrap_operation,
-        )
-        .labeled("operation")
+        self.reparse_valid_template(&language, &self.op_summary_template_text)
+            .labeled(["operation"])
     }
 
     pub fn short_change_id_template(&self) -> TemplateRenderer<'_, Commit> {
         let language = self.commit_template_language();
-        self.reparse_valid_template(
-            &language,
-            SHORT_CHANGE_ID_TEMPLATE_TEXT,
-            CommitTemplatePropertyKind::wrap_commit,
-        )
+        self.reparse_valid_template(&language, SHORT_CHANGE_ID_TEMPLATE_TEXT)
+            .labeled(["commit"])
     }
 
     /// Returns one-line summary of the given `commit`.
@@ -1809,10 +1828,7 @@ to the current parents may contain changes from multiple commits.
     /// Use `write_commit_summary()` to get colorized output. Use
     /// `commit_summary_template()` if you have many commits to process.
     pub fn format_commit_summary(&self, commit: &Commit) -> String {
-        let mut output = Vec::new();
-        self.write_commit_summary(&mut PlainTextFormatter::new(&mut output), commit)
-            .expect("write() to PlainTextFormatter should never fail");
-        // Template output is usually UTF-8, but it can contain file content.
+        let output = self.commit_summary_template().format_plain_text(commit);
         output.into_string_lossy()
     }
 
@@ -1832,17 +1848,24 @@ to the current parents may contain changes from multiple commits.
         &self,
         commits: impl IntoIterator<Item = &'a CommitId>,
     ) -> Result<(), CommandError> {
-        let Some((commit_id, lower_bound, upper_bound)) = self
-            .env
-            .find_immutable_commit(self.repo().as_ref(), commits)?
-        else {
+        let commit_ids = commits.into_iter().cloned().collect_vec();
+        let to_rewrite_expr = RevsetExpression::commits(commit_ids);
+        self.check_rewritable_expr(&to_rewrite_expr)
+    }
+
+    pub fn check_rewritable_expr(
+        &self,
+        to_rewrite_expr: &Arc<ResolvedRevsetExpression>,
+    ) -> Result<(), CommandError> {
+        let repo = self.repo().as_ref();
+        let Some(commit_id) = self.env.find_immutable_commit(repo, to_rewrite_expr)? else {
             return Ok(());
         };
-        let error = if &commit_id == self.repo().store().root_commit_id() {
+        let error = if &commit_id == repo.store().root_commit_id() {
             user_error(format!("The root commit {commit_id:.12} is immutable"))
         } else {
             let mut error = user_error(format!("Commit {commit_id:.12} is immutable"));
-            let commit = self.repo().store().get_commit(&commit_id)?;
+            let commit = repo.store().get_commit(&commit_id)?;
             error.add_formatted_hint_with(|formatter| {
                 write!(formatter, "Could not modify commit: ")?;
                 self.write_commit_summary(formatter, &commit)?;
@@ -1851,9 +1874,23 @@ to the current parents may contain changes from multiple commits.
             error.add_hint("Immutable commits are used to protect shared history.");
             error.add_hint(indoc::indoc! {"
                 For more information, see:
-                      - https://jj-vcs.github.io/jj/latest/config/#set-of-immutable-commits
+                      - https://docs.jj-vcs.dev/latest/config/#set-of-immutable-commits
                       - `jj help -k config`, \"Set of immutable commits\""});
 
+            // Not using self.id_prefix_context() for consistency with
+            // find_immutable_commit().
+            let id_prefix_context =
+                IdPrefixContext::new(self.env.command.revset_extensions().clone());
+            let (lower_bound, upper_bound) = RevsetExpressionEvaluator::new(
+                repo,
+                self.env.command.revset_extensions().clone(),
+                &id_prefix_context,
+                self.env.immutable_expression(),
+            )
+            .resolve()?
+            .intersection(&to_rewrite_expr.descendants())
+            .evaluate(repo)?
+            .count_estimate()?;
             let exact = upper_bound == Some(lower_bound);
             let or_more = if exact { "" } else { " or more" };
             error.add_hint(format!(
@@ -1871,19 +1908,7 @@ to the current parents may contain changes from multiple commits.
         ui: &Ui,
     ) -> Result<SnapshotStats, SnapshotWorkingCopyError> {
         let workspace_name = self.workspace_name().to_owned();
-        let get_wc_commit = |repo: &ReadonlyRepo| -> Result<Option<_>, _> {
-            repo.view()
-                .get_wc_commit_id(&workspace_name)
-                .map(|id| repo.store().get_commit(id))
-                .transpose()
-                .map_err(snapshot_command_error)
-        };
         let repo = self.repo().clone();
-        let Some(wc_commit) = get_wc_commit(&repo)? else {
-            // If the workspace has been deleted, it's unclear what to do, so we just skip
-            // committing the working copy.
-            return Ok(SnapshotStats::default());
-        };
         let auto_tracking_matcher = self
             .auto_tracking_matcher(ui)
             .map_err(snapshot_command_error)?;
@@ -1896,76 +1921,34 @@ to the current parents may contain changes from multiple commits.
             .workspace
             .start_working_copy_mutation()
             .map_err(snapshot_command_error)?;
-        let old_op_id = locked_ws.locked_wc().old_operation_id().clone();
 
-        let (repo, wc_commit) =
-            match WorkingCopyFreshness::check_stale(locked_ws.locked_wc(), &wc_commit, &repo) {
-                Ok(WorkingCopyFreshness::Fresh) => (repo, wc_commit),
-                Ok(WorkingCopyFreshness::Updated(wc_operation)) => {
-                    let repo = repo
-                        .reload_at(&wc_operation)
-                        .map_err(snapshot_command_error)?;
-                    let wc_commit = if let Some(wc_commit) = get_wc_commit(&repo)? {
-                        wc_commit
-                    } else {
-                        // The workspace has been deleted (see above)
-                        return Ok(SnapshotStats::default());
-                    };
-                    (repo, wc_commit)
-                }
-                Ok(WorkingCopyFreshness::WorkingCopyStale) => {
-                    return Err(SnapshotWorkingCopyError::StaleWorkingCopy(
-                        user_error_with_hint(
-                            format!(
-                                "The working copy is stale (not updated since operation {}).",
-                                short_operation_hash(&old_op_id)
-                            ),
-                            "Run `jj workspace update-stale` to update it.
-See https://jj-vcs.github.io/jj/latest/working-copy/#stale-working-copy \
-                             for more information.",
-                        ),
-                    ));
-                }
-                Ok(WorkingCopyFreshness::SiblingOperation) => {
-                    return Err(SnapshotWorkingCopyError::StaleWorkingCopy(internal_error(
-                        format!(
-                            "The repo was loaded at operation {}, which seems to be a sibling of \
-                             the working copy's operation {}",
-                            short_operation_hash(repo.op_id()),
-                            short_operation_hash(&old_op_id)
-                        ),
-                    )));
-                }
-                Err(OpStoreError::ObjectNotFound { .. }) => {
-                    return Err(SnapshotWorkingCopyError::StaleWorkingCopy(
-                        user_error_with_hint(
-                            "Could not read working copy's operation.",
-                            "Run `jj workspace update-stale` to recover.
-See https://jj-vcs.github.io/jj/latest/working-copy/#stale-working-copy \
-                             for more information.",
-                        ),
-                    ));
-                }
-                Err(e) => return Err(snapshot_command_error(e)),
-            };
+        let Some((repo, wc_commit)) =
+            handle_stale_working_copy(locked_ws.locked_wc(), repo, &workspace_name)?
+        else {
+            // If the workspace has been deleted, it's unclear what to do, so we just skip
+            // committing the working copy.
+            return Ok(SnapshotStats::default());
+        };
+
         self.user_repo = ReadonlyUserRepo::new(repo);
-        let (new_tree_id, stats) = {
+        let (new_tree, stats) = {
             let mut options = options;
             let progress = crate::progress::snapshot_progress(ui);
             options.progress = progress.as_ref().map(|x| x as _);
             locked_ws
                 .locked_wc()
                 .snapshot(&options)
+                .block_on()
                 .map_err(snapshot_command_error)?
         };
-        if new_tree_id != *wc_commit.tree_id() {
+        if new_tree.tree_ids_and_labels() != wc_commit.tree().tree_ids_and_labels() {
             let mut tx =
                 start_repo_transaction(&self.user_repo.repo, self.env.command.string_args());
             tx.set_is_snapshot(true);
             let mut_repo = tx.repo_mut();
             let commit = mut_repo
                 .rewrite_commit(&wc_commit)
-                .set_tree_id(new_tree_id)
+                .set_tree(new_tree)
                 .write()
                 .map_err(snapshot_command_error)?;
             mut_repo
@@ -1986,17 +1969,9 @@ See https://jj-vcs.github.io/jj/latest/working-copy/#stale-working-copy \
 
             #[cfg(feature = "git")]
             if self.working_copy_shared_with_git {
-                let old_tree = wc_commit.tree().map_err(snapshot_command_error)?;
-                let new_tree = commit.tree().map_err(snapshot_command_error)?;
-                jj_lib::git::update_intent_to_add(
-                    self.user_repo.repo.as_ref(),
-                    &old_tree,
-                    &new_tree,
-                )
-                .map_err(snapshot_command_error)?;
-
-                let stats = jj_lib::git::export_refs(mut_repo).map_err(snapshot_command_error)?;
-                crate::git_util::print_git_export_stats(ui, &stats)
+                let old_tree = wc_commit.tree();
+                let new_tree = commit.tree();
+                export_working_copy_changes_to_git(ui, mut_repo, &old_tree, &new_tree)
                     .map_err(snapshot_command_error)?;
             }
 
@@ -2018,13 +1993,11 @@ See https://jj-vcs.github.io/jj/latest/working-copy/#stale-working-copy \
         new_commit: &Commit,
     ) -> Result<(), CommandError> {
         assert!(self.may_update_working_copy);
-        let checkout_options = self.checkout_options();
         let stats = update_working_copy(
             &self.user_repo.repo,
             &mut self.workspace,
             maybe_old_commit,
             new_commit,
-            &checkout_options,
         )?;
         self.print_updated_working_copy_stats(ui, maybe_old_commit, new_commit, &stats)
     }
@@ -2036,38 +2009,37 @@ See https://jj-vcs.github.io/jj/latest/working-copy/#stale-working-copy \
         new_commit: &Commit,
         stats: &CheckoutStats,
     ) -> Result<(), CommandError> {
-        if Some(new_commit) != maybe_old_commit {
-            if let Some(mut formatter) = ui.status_formatter() {
-                let template = self.commit_summary_template();
-                write!(formatter, "Working copy  (@) now at: ")?;
-                formatter.with_label("working_copy", |fmt| template.format(new_commit, fmt))?;
+        if Some(new_commit) != maybe_old_commit
+            && let Some(mut formatter) = ui.status_formatter()
+        {
+            let template = self.commit_summary_template();
+            write!(formatter, "Working copy  (@) now at: ")?;
+            template.format(new_commit, formatter.as_mut())?;
+            writeln!(formatter)?;
+            for parent in new_commit.parents() {
+                let parent = parent?;
+                //                "Working copy  (@) now at: "
+                write!(formatter, "Parent commit (@-)      : ")?;
+                template.format(&parent, formatter.as_mut())?;
                 writeln!(formatter)?;
-                for parent in new_commit.parents() {
-                    let parent = parent?;
-                    //                "Working copy  (@) now at: "
-                    write!(formatter, "Parent commit (@-)      : ")?;
-                    template.format(&parent, formatter.as_mut())?;
-                    writeln!(formatter)?;
-                }
             }
         }
         print_checkout_stats(ui, stats, new_commit)?;
-        if Some(new_commit) != maybe_old_commit {
-            if let Some(mut formatter) = ui.status_formatter() {
-                if new_commit.has_conflict()? {
-                    let conflicts = new_commit.tree()?.conflicts().collect_vec();
-                    writeln!(
-                        formatter.labeled("warning").with_heading("Warning: "),
-                        "There are unresolved conflicts at these paths:"
-                    )?;
-                    print_conflicted_paths(conflicts, formatter.as_mut(), self)?;
-                }
-            }
+        if Some(new_commit) != maybe_old_commit
+            && let Some(mut formatter) = ui.status_formatter()
+            && new_commit.has_conflict()
+        {
+            let conflicts = new_commit.tree().conflicts().collect_vec();
+            writeln!(
+                formatter.labeled("warning").with_heading("Warning: "),
+                "There are unresolved conflicts at these paths:"
+            )?;
+            print_conflicted_paths(conflicts, formatter.as_mut(), self)?;
         }
         Ok(())
     }
 
-    pub fn start_transaction(&mut self) -> WorkspaceCommandTransaction {
+    pub fn start_transaction(&mut self) -> WorkspaceCommandTransaction<'_> {
         let tx = start_repo_transaction(self.repo(), self.env.command.string_args());
         let id_prefix_context = mem::take(&mut self.user_repo.id_prefix_context);
         WorkspaceCommandTransaction {
@@ -2082,11 +2054,8 @@ See https://jj-vcs.github.io/jj/latest/working-copy/#stale-working-copy \
         ui: &Ui,
         mut tx: Transaction,
         description: impl Into<String>,
+        _git_import_export_lock: &GitImportExportLock,
     ) -> Result<(), CommandError> {
-        if !tx.repo().has_changes() {
-            writeln!(ui.status(), "Nothing changed.")?;
-            return Ok(());
-        }
         let num_rebased = tx.repo_mut().rebase_descendants()?;
         if num_rebased > 0 {
             writeln!(ui.status(), "Rebased {num_rebased} descendant commits")?;
@@ -2095,7 +2064,7 @@ See https://jj-vcs.github.io/jj/latest/working-copy/#stale-working-copy \
         for (name, wc_commit_id) in &tx.repo().view().wc_commit_ids().clone() {
             if self
                 .env
-                .find_immutable_commit(tx.repo(), [wc_commit_id])?
+                .find_immutable_commit(tx.repo(), &RevsetExpression::commit(wc_commit_id.clone()))?
                 .is_some()
             {
                 let wc_commit = tx.repo().store().get_commit(wc_commit_id)?;
@@ -2127,8 +2096,12 @@ See https://jj-vcs.github.io/jj/latest/working-copy/#stale-working-copy \
         if self.working_copy_shared_with_git {
             use std::error::Error as _;
             if let Some(wc_commit) = &maybe_new_wc_commit {
-                // This can fail if HEAD was updated concurrently. In that case,
-                // the actual state will be imported on the next snapshot.
+                // Export Git HEAD while holding the git-head lock to prevent races:
+                // - Between two finish_transaction calls updating HEAD
+                // - With import_git_head importing HEAD concurrently
+                // This can still fail if HEAD was updated concurrently by another JJ process
+                // (overlapping transaction) or a non-JJ process (e.g., git checkout). In that
+                // case, the actual state will be imported on the next snapshot.
                 match jj_lib::git::reset_head(tx.repo_mut(), wc_commit) {
                     Ok(()) => {}
                     Err(err @ jj_lib::git::GitResetHeadError::UpdateHeadRef(_)) => {
@@ -2216,7 +2189,7 @@ See https://jj-vcs.github.io/jj/latest/working-copy/#stale-working-copy \
         let added_conflicts_expr = old_heads.range(&new_heads).intersection(&conflicts);
 
         let get_commits =
-            |expr: Rc<ResolvedRevsetExpression>| -> Result<Vec<Commit>, CommandError> {
+            |expr: Arc<ResolvedRevsetExpression>| -> Result<Vec<Commit>, CommandError> {
                 let commits = expr
                     .evaluate(new_repo)?
                     .iter()
@@ -2307,7 +2280,8 @@ See https://jj-vcs.github.io/jj/latest/working-copy/#stale-working-copy \
         repo: &ReadonlyRepo,
         conflicted_commits: Vec<CommitId>,
     ) -> Result<(), CommandError> {
-        if !self.settings().get_bool("hints.resolving-conflicts")? {
+        if !self.settings().get_bool("hints.resolving-conflicts")? || conflicted_commits.is_empty()
+        {
             return Ok(());
         }
 
@@ -2321,31 +2295,41 @@ See https://jj-vcs.github.io/jj/latest/working-copy/#stale-working-copy \
             .commits(repo.store())
             .try_collect()?;
 
-        if !root_conflict_commits.is_empty() {
-            let instruction = if only_one_conflicted_commit {
-                "To resolve the conflicts, start by updating to it"
-            } else if root_conflict_commits.len() == 1 {
-                "To resolve the conflicts, start by updating to the first one"
-            } else {
-                "To resolve the conflicts, start by updating to one of the first ones"
-            };
-            writeln!(fmt.labeled("hint").with_heading("Hint: "), "{instruction}:")?;
-            let format_short_change_id = self.short_change_id_template();
-            fmt.with_label("hint", |fmt| {
-                for commit in &root_conflict_commits {
-                    write!(fmt, "  jj new ")?;
-                    format_short_change_id.format(commit, fmt)?;
-                    writeln!(fmt)?;
-                }
-                io::Result::Ok(())
-            })?;
-            writeln!(
-                fmt.labeled("hint"),
-                r#"Then use `jj resolve`, or edit the conflict markers in the file directly.
-Once the conflicts are resolved, you may want to inspect the result with `jj diff`.
-Then run `jj squash` to move the resolution into the conflicted commit."#,
-            )?;
+        // The common part of these strings is not extracted, to avoid i18n issues.
+        let instruction = if only_one_conflicted_commit {
+            indoc! {"
+            To resolve the conflicts, start by creating a commit on top of
+            the conflicted commit:
+            "}
+        } else if root_conflict_commits.len() == 1 {
+            indoc! {"
+            To resolve the conflicts, start by creating a commit on top of
+            the first conflicted commit:
+            "}
+        } else {
+            indoc! {"
+            To resolve the conflicts, start by creating a commit on top of
+            one of the first conflicted commits:
+            "}
+        };
+        write!(fmt.labeled("hint").with_heading("Hint: "), "{instruction}")?;
+        let format_short_change_id = self.short_change_id_template();
+        {
+            let mut fmt = fmt.labeled("hint");
+            for commit in &root_conflict_commits {
+                write!(fmt, "  jj new ")?;
+                format_short_change_id.format(commit, *fmt)?;
+                writeln!(fmt)?;
+            }
         }
+        writedoc!(
+            fmt.labeled("hint"),
+            "
+            Then use `jj resolve`, or edit the conflict markers in the file directly.
+            Once the conflicts are resolved, you can inspect the result with `jj diff`.
+            Then run `jj squash` to move the resolution into the conflicted commit.
+            ",
+        )?;
         Ok(())
     }
 
@@ -2365,18 +2349,18 @@ Then run `jj squash` to move the resolution into the conflicted commit."#,
     /// Returns an empty `std::Vec` if no bookmarks are eligible to advance.
     pub fn get_advanceable_bookmarks<'a>(
         &self,
+        ui: &Ui,
         from: impl IntoIterator<Item = &'a CommitId>,
     ) -> Result<Vec<AdvanceableBookmark>, CommandError> {
-        let ab_settings = AdvanceBookmarksSettings::from_settings(self.settings())?;
-        if !ab_settings.feature_enabled() {
+        let Some(ab_matcher) = load_advance_bookmarks_matcher(ui, self.settings())? else {
             // Return early if we know that there's no work to do.
             return Ok(Vec::new());
-        }
+        };
 
         let mut advanceable_bookmarks = Vec::new();
         for from_commit in from {
             for (name, _) in self.repo().view().local_bookmarks_for_commit(from_commit) {
-                if ab_settings.bookmark_is_eligible(name) {
+                if ab_matcher.is_match(name.as_str()) {
                     advanceable_bookmarks.push(AdvanceableBookmark {
                         name: name.to_owned(),
                         old_commit_id: from_commit.clone(),
@@ -2387,6 +2371,29 @@ Then run `jj squash` to move the resolution into the conflicted commit."#,
 
         Ok(advanceable_bookmarks)
     }
+}
+
+#[cfg(feature = "git")]
+pub fn export_working_copy_changes_to_git(
+    ui: &Ui,
+    mut_repo: &mut MutableRepo,
+    old_tree: &MergedTree,
+    new_tree: &MergedTree,
+) -> Result<(), CommandError> {
+    let repo = mut_repo.base_repo().as_ref();
+    jj_lib::git::update_intent_to_add(repo, old_tree, new_tree)?;
+    let stats = jj_lib::git::export_refs(mut_repo)?;
+    crate::git_util::print_git_export_stats(ui, &stats)?;
+    Ok(())
+}
+#[cfg(not(feature = "git"))]
+pub fn export_working_copy_changes_to_git(
+    _ui: &Ui,
+    _mut_repo: &mut MutableRepo,
+    _old_tree: &MergedTree,
+    _new_tree: &MergedTree,
+) -> Result<(), CommandError> {
+    Ok(())
 }
 
 /// An ongoing [`Transaction`] tied to a particular workspace.
@@ -2441,10 +2448,7 @@ impl WorkspaceCommandTransaction<'_> {
     }
 
     pub fn format_commit_summary(&self, commit: &Commit) -> String {
-        let mut output = Vec::new();
-        self.write_commit_summary(&mut PlainTextFormatter::new(&mut output), commit)
-            .expect("write() to PlainTextFormatter should never fail");
-        // Template output is usually UTF-8, but it can contain file content.
+        let output = self.commit_summary_template().format_plain_text(commit);
         output.into_string_lossy()
     }
 
@@ -2459,11 +2463,9 @@ impl WorkspaceCommandTransaction<'_> {
     /// Template for one-line summary of a commit within transaction.
     pub fn commit_summary_template(&self) -> TemplateRenderer<'_, Commit> {
         let language = self.commit_template_language();
-        self.helper.reparse_valid_template(
-            &language,
-            &self.helper.commit_summary_template_text,
-            CommitTemplatePropertyKind::wrap_commit,
-        )
+        self.helper
+            .reparse_valid_template(&language, &self.helper.commit_summary_template_text)
+            .labeled(["commit"])
     }
 
     /// Creates commit template language environment capturing the current
@@ -2484,16 +2486,19 @@ impl WorkspaceCommandTransaction<'_> {
         template_text: &str,
     ) -> Result<TemplateRenderer<'_, Commit>, CommandError> {
         let language = self.commit_template_language();
-        self.helper.env.parse_template(
-            ui,
-            &language,
-            template_text,
-            CommitTemplatePropertyKind::wrap_commit,
-        )
+        self.helper.env.parse_template(ui, &language, template_text)
     }
 
     pub fn finish(self, ui: &Ui, description: impl Into<String>) -> Result<(), CommandError> {
-        self.helper.finish_transaction(ui, self.tx, description)
+        if !self.tx.repo().has_changes() {
+            writeln!(ui.status(), "Nothing changed.")?;
+            return Ok(());
+        }
+        // Acquire git import/export lock before finishing the transaction to ensure
+        // Git HEAD export happens atomically with the transaction commit.
+        let git_import_export_lock = self.helper.lock_git_import_export()?;
+        self.helper
+            .finish_transaction(ui, self.tx, description, &git_import_export_lock)
     }
 
     /// Returns the wrapped [`Transaction`] for circumstances where
@@ -2509,7 +2514,11 @@ impl WorkspaceCommandTransaction<'_> {
     /// commit. If the bookmark is conflicted before the update, it will
     /// remain conflicted after the update, but the conflict will involve
     /// the `move_to` commit instead of the old commit.
-    pub fn advance_bookmarks(&mut self, bookmarks: Vec<AdvanceableBookmark>, move_to: &CommitId) {
+    pub fn advance_bookmarks(
+        &mut self,
+        bookmarks: Vec<AdvanceableBookmark>,
+        move_to: &CommitId,
+    ) -> Result<(), CommandError> {
         for bookmark in bookmarks {
             // This removes the old commit ID from the bookmark's RefTarget and
             // replaces it with the `move_to` ID.
@@ -2517,8 +2526,9 @@ impl WorkspaceCommandTransaction<'_> {
                 &bookmark.name,
                 &RefTarget::normal(bookmark.old_commit_id),
                 &RefTarget::normal(move_to.clone()),
-            );
+            )?;
         }
+        Ok(())
     }
 }
 
@@ -2540,7 +2550,7 @@ fn map_workspace_load_error(err: WorkspaceLoadError, user_wc_path: Option<&str>)
                     message,
                     "It looks like this is a git repo. You can create a jj repo backed by it by \
                      running this:
-jj git init --colocate",
+jj git init",
                 )
             } else {
                 user_error(message)
@@ -2561,7 +2571,7 @@ jj git init --colocate",
         ) => internal_error_with_message("The repository appears broken or inaccessible", err),
         WorkspaceLoadError::StoreLoadError(StoreLoadError::Signing(err)) => user_error(err),
         WorkspaceLoadError::WorkingCopyState(err) => internal_error(err),
-        WorkspaceLoadError::NonUnicodePath | WorkspaceLoadError::Path(_) => user_error(err),
+        WorkspaceLoadError::DecodeRepoPath(_) | WorkspaceLoadError::Path(_) => user_error(err),
     }
 }
 
@@ -2595,21 +2605,87 @@ pub fn start_repo_transaction(repo: &Arc<ReadonlyRepo>, string_args: &[String]) 
     tx
 }
 
+/// Check if the working copy is stale and reload the repo if the repo is ahead
+/// of the working copy.
+///
+/// Returns Ok(None) if the workspace doesn't exist in the repo (presumably
+/// because it was deleted).
+fn handle_stale_working_copy(
+    locked_wc: &mut dyn LockedWorkingCopy,
+    repo: Arc<ReadonlyRepo>,
+    workspace_name: &WorkspaceName,
+) -> Result<Option<(Arc<ReadonlyRepo>, Commit)>, SnapshotWorkingCopyError> {
+    let get_wc_commit = |repo: &ReadonlyRepo| -> Result<Option<_>, _> {
+        repo.view()
+            .get_wc_commit_id(workspace_name)
+            .map(|id| repo.store().get_commit(id))
+            .transpose()
+            .map_err(snapshot_command_error)
+    };
+    let Some(wc_commit) = get_wc_commit(&repo)? else {
+        return Ok(None);
+    };
+    let old_op_id = locked_wc.old_operation_id().clone();
+    match WorkingCopyFreshness::check_stale(locked_wc, &wc_commit, &repo) {
+        Ok(WorkingCopyFreshness::Fresh) => Ok(Some((repo, wc_commit))),
+        Ok(WorkingCopyFreshness::Updated(wc_operation)) => {
+            let repo = repo
+                .reload_at(&wc_operation)
+                .map_err(snapshot_command_error)?;
+            if let Some(wc_commit) = get_wc_commit(&repo)? {
+                Ok(Some((repo, wc_commit)))
+            } else {
+                Ok(None)
+            }
+        }
+        Ok(WorkingCopyFreshness::WorkingCopyStale) => Err(
+            SnapshotWorkingCopyError::StaleWorkingCopy(user_error_with_hint(
+                format!(
+                    "The working copy is stale (not updated since operation {}).",
+                    short_operation_hash(&old_op_id)
+                ),
+                "Run `jj workspace update-stale` to update it.
+See https://docs.jj-vcs.dev/latest/working-copy/#stale-working-copy \
+                 for more information.",
+            )),
+        ),
+        Ok(WorkingCopyFreshness::SiblingOperation) => Err(
+            SnapshotWorkingCopyError::StaleWorkingCopy(internal_error(format!(
+                "The repo was loaded at operation {}, which seems to be a sibling of the working \
+                 copy's operation {}",
+                short_operation_hash(repo.op_id()),
+                short_operation_hash(&old_op_id)
+            ))),
+        ),
+        Err(OpStoreError::ObjectNotFound { .. }) => Err(
+            SnapshotWorkingCopyError::StaleWorkingCopy(user_error_with_hint(
+                "Could not read working copy's operation.",
+                "Run `jj workspace update-stale` to recover.
+See https://docs.jj-vcs.dev/latest/working-copy/#stale-working-copy \
+                 for more information.",
+            )),
+        ),
+        Err(e) => Err(snapshot_command_error(e)),
+    }
+}
+
 fn update_stale_working_copy(
     mut locked_ws: LockedWorkspace,
     op_id: OperationId,
     stale_commit: &Commit,
     new_commit: &Commit,
-    options: &CheckoutOptions,
 ) -> Result<CheckoutStats, CommandError> {
     // The same check as start_working_copy_mutation(), but with the stale
     // working-copy commit.
-    if stale_commit.tree_id() != locked_ws.locked_wc().old_tree_id() {
+    if stale_commit.tree().tree_ids_and_labels()
+        != locked_ws.locked_wc().old_tree().tree_ids_and_labels()
+    {
         return Err(user_error("Concurrent working copy operation. Try again."));
     }
     let stats = locked_ws
         .locked_wc()
-        .check_out(new_commit, options)
+        .check_out(new_commit)
+        .block_on()
         .map_err(|err| {
             internal_error_with_message(
                 format!("Failed to check out commit {}", new_commit.id().hex()),
@@ -2689,7 +2765,6 @@ pub fn print_conflicted_paths(
                     TreeValue::Symlink(_) => "a symlink",
                     TreeValue::Tree(_) => "a directory",
                     TreeValue::GitSubmodule(_) => "a git submodule",
-                    TreeValue::Conflict(_) => "another conflict (you found a bug!)",
                 }
                 .to_string(),
                 "difficult",
@@ -2697,12 +2772,13 @@ pub fn print_conflicted_paths(
         }
 
         write!(formatter, "{formatted_path} ")?;
-        formatter.with_label("conflict_description", |formatter| {
+        {
+            let mut formatter = formatter.labeled("conflict_description");
             let print_pair = |formatter: &mut dyn Formatter, (text, label): &(String, &str)| {
                 write!(formatter.labeled(label), "{text}")
             };
             print_pair(
-                formatter,
+                *formatter,
                 &(
                     format!("{sides}-sided"),
                     if sides > 2 { "difficult" } else { "normal" },
@@ -2715,20 +2791,19 @@ pub fn print_conflicted_paths(
                 let seen_objects = seen_objects.into_iter().collect_vec();
                 match &seen_objects[..] {
                     [] => unreachable!(),
-                    [only] => print_pair(formatter, only)?,
+                    [only] => print_pair(*formatter, only)?,
                     [first, middle @ .., last] => {
-                        print_pair(formatter, first)?;
+                        print_pair(*formatter, first)?;
                         for pair in middle {
                             write!(formatter, ", ")?;
-                            print_pair(formatter, pair)?;
+                            print_pair(*formatter, pair)?;
                         }
                         write!(formatter, " and ")?;
-                        print_pair(formatter, last)?;
+                        print_pair(*formatter, last)?;
                     }
-                };
+                }
             }
-            io::Result::Ok(())
-        })?;
+        }
         writeln!(formatter)?;
     }
     Ok(())
@@ -2851,18 +2926,19 @@ pub fn print_unmatched_explicit_paths<'a>(
     for tree in trees {
         // TODO: propagate errors
         explicit_paths.retain(|&path| tree.path_value(path).unwrap().is_absent());
-        if explicit_paths.is_empty() {
-            return Ok(());
-        }
     }
-    let ui_paths = explicit_paths
-        .iter()
-        .map(|&path| workspace_command.format_file_path(path))
-        .join(", ");
-    writeln!(
-        ui.warning_default(),
-        "No matching entries for paths: {ui_paths}"
-    )?;
+
+    if !explicit_paths.is_empty() {
+        let ui_paths = explicit_paths
+            .iter()
+            .map(|&path| workspace_command.format_file_path(path))
+            .join(", ");
+        writeln!(
+            ui.warning_default(),
+            "No matching entries for paths: {ui_paths}"
+        )?;
+    }
+
     Ok(())
 }
 
@@ -2871,18 +2947,12 @@ pub fn update_working_copy(
     workspace: &mut Workspace,
     old_commit: Option<&Commit>,
     new_commit: &Commit,
-    options: &CheckoutOptions,
 ) -> Result<CheckoutStats, CommandError> {
-    let old_tree_id = old_commit.map(|commit| commit.tree_id().clone());
+    let old_tree = old_commit.map(|commit| commit.tree());
     // TODO: CheckoutError::ConcurrentCheckout should probably just result in a
     // warning for most commands (but be an error for the checkout command)
     let stats = workspace
-        .check_out(
-            repo.op_id().clone(),
-            old_tree_id.as_ref(),
-            new_commit,
-            options,
-        )
+        .check_out(repo.op_id().clone(), old_tree.as_ref(), new_commit)
         .map_err(|err| {
             internal_error_with_message(
                 format!("Failed to check out commit {}", new_commit.id().hex()),
@@ -2892,15 +2962,29 @@ pub fn update_working_copy(
     Ok(stats)
 }
 
+/// Returns the special remote name that should be ignored by default.
+#[cfg_attr(not(feature = "git"), expect(unused_variables))]
+pub fn default_ignored_remote_name(store: &Store) -> Option<&'static RemoteName> {
+    #[cfg(feature = "git")]
+    {
+        use jj_lib::git;
+        if git::get_git_backend(store).is_ok() {
+            return Some(git::REMOTE_NAME_FOR_LOCAL_GIT_REPO);
+        }
+    }
+    None
+}
+
 /// Whether or not the `bookmark` has any tracked remotes (i.e. is a tracking
 /// local bookmark.)
-pub fn has_tracked_remote_bookmarks(view: &View, bookmark: &RefName) -> bool {
-    view.remote_bookmarks_matching(
-        &StringPattern::exact(bookmark),
-        &StringPattern::everything(),
-    )
-    .filter(|&(symbol, _)| !jj_lib::git::is_special_git_remote(symbol.remote))
-    .any(|(_, remote_ref)| remote_ref.is_tracked())
+pub fn has_tracked_remote_bookmarks(repo: &dyn Repo, bookmark: &RefName) -> bool {
+    let remote_matcher = match default_ignored_remote_name(repo.store()) {
+        Some(remote) => StringExpression::exact(remote).negated().to_matcher(),
+        None => StringMatcher::all(),
+    };
+    repo.view()
+        .remote_bookmarks_matching(&StringMatcher::exact(bookmark), &remote_matcher)
+        .any(|(_, remote_ref)| remote_ref.is_tracked())
 }
 
 pub fn load_template_aliases(
@@ -2950,7 +3034,7 @@ pub struct LogContentFormat {
 impl LogContentFormat {
     /// Creates new formatting helper for the terminal.
     pub fn new(ui: &Ui, settings: &UserSettings) -> Result<Self, ConfigGetError> {
-        Ok(LogContentFormat {
+        Ok(Self {
             width: ui.term_width(),
             word_wrap: settings.get_bool("ui.log-word-wrap")?,
         })
@@ -2959,7 +3043,7 @@ impl LogContentFormat {
     /// Subtracts the given `width` and returns new formatting helper.
     #[must_use]
     pub fn sub_width(&self, width: usize) -> Self {
-        LogContentFormat {
+        Self {
             width: self.width.saturating_sub(width),
             word_wrap: self.word_wrap,
         }
@@ -3008,7 +3092,7 @@ pub enum DiffSelector {
 
 impl DiffSelector {
     pub fn is_interactive(&self) -> bool {
-        matches!(self, DiffSelector::Interactive(_))
+        matches!(self, Self::Interactive(_))
     }
 
     /// Restores diffs from the `right_tree` to the `left_tree` by using an
@@ -3017,27 +3101,30 @@ impl DiffSelector {
     /// Only files matching the `matcher` will be copied to the new tree.
     pub fn select(
         &self,
-        left_tree: &MergedTree,
-        right_tree: &MergedTree,
+        trees: Diff<&MergedTree>,
         matcher: &dyn Matcher,
         format_instructions: impl FnOnce() -> String,
-    ) -> Result<MergedTreeId, CommandError> {
-        let selected_tree_id = restore_tree(right_tree, left_tree, matcher)?;
+    ) -> Result<MergedTree, CommandError> {
+        let selected_tree = restore_tree(trees.after, trees.before, matcher).block_on()?;
         match self {
-            DiffSelector::NonInteractive => Ok(selected_tree_id),
-            DiffSelector::Interactive(editor) => {
+            Self::NonInteractive => Ok(selected_tree),
+            Self::Interactive(editor) => {
                 // edit_diff_external() is designed to edit the right tree,
                 // whereas we want to update the left tree. Unmatched paths
                 // shouldn't be based off the right tree.
-                let right_tree = right_tree.store().get_root_tree(&selected_tree_id)?;
-                Ok(editor.edit(left_tree, &right_tree, matcher, format_instructions)?)
+                Ok(editor.edit(
+                    Diff::new(trees.before, &selected_tree),
+                    matcher,
+                    format_instructions,
+                )?)
             }
         }
     }
 }
 
+// TODO: Delete in jj 0.43+
 #[derive(Clone, Debug)]
-pub struct RemoteBookmarkNamePattern {
+pub(crate) struct RemoteBookmarkNamePattern {
     pub bookmark: StringPattern,
     pub remote: StringPattern,
 }
@@ -3057,14 +3144,14 @@ impl FromStr for RemoteBookmarkNamePattern {
             if let Some(kind) = maybe_kind {
                 StringPattern::from_str_kind(pat, kind).map_err(|err| err.to_string())
             } else {
-                Ok(StringPattern::exact(pat))
+                StringPattern::glob(pat).map_err(|err| err.to_string())
             }
         };
         // TODO: maybe reuse revset parser to handle bookmark/remote name containing @
         let (bookmark, remote) = pat.rsplit_once('@').ok_or_else(|| {
             "remote bookmark must be specified in bookmark@remote form".to_owned()
         })?;
-        Ok(RemoteBookmarkNamePattern {
+        Ok(Self {
             bookmark: to_pattern(bookmark)?,
             remote: to_pattern(remote)?,
         })
@@ -3072,16 +3159,18 @@ impl FromStr for RemoteBookmarkNamePattern {
 }
 
 impl RemoteBookmarkNamePattern {
-    pub fn is_exact(&self) -> bool {
-        self.bookmark.is_exact() && self.remote.is_exact()
+    pub fn as_exact(&self) -> Option<RemoteRefSymbol<'_>> {
+        let bookmark = RefName::new(self.bookmark.as_exact()?);
+        let remote = RemoteName::new(self.remote.as_exact()?);
+        Some(bookmark.to_remote_symbol(remote))
     }
 }
 
 impl fmt::Display for RemoteBookmarkNamePattern {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         // TODO: use revset::format_remote_symbol() if FromStr is migrated to
         // the revset parser.
-        let RemoteBookmarkNamePattern { bookmark, remote } = self;
+        let Self { bookmark, remote } = self;
         write!(f, "{bookmark}@{remote}")
     }
 }
@@ -3103,7 +3192,7 @@ pub fn compute_commit_location(
             if let Some(revisions) = revisions {
                 Ok(Some(
                     workspace_command
-                        .resolve_some_revsets_default_single(ui, revisions)?
+                        .resolve_revsets_ordered(ui, revisions)?
                         .into_iter()
                         .collect_vec(),
                 ))
@@ -3164,6 +3253,10 @@ pub fn compute_commit_location(
         )?;
     }
 
+    if new_parent_ids.is_empty() {
+        return Err(user_error("No revisions found to use as parent"));
+    }
+
     Ok((new_parent_ids, new_child_ids))
 }
 
@@ -3171,8 +3264,8 @@ pub fn compute_commit_location(
 /// parents of the given commits.
 fn ensure_no_commit_loop(
     repo: &ReadonlyRepo,
-    children_expression: &Rc<ResolvedRevsetExpression>,
-    parents_expression: &Rc<ResolvedRevsetExpression>,
+    children_expression: &Arc<ResolvedRevsetExpression>,
+    parents_expression: &Arc<ResolvedRevsetExpression>,
     commit_type: &str,
 ) -> Result<(), CommandError> {
     if let Some(commit_id) = children_expression
@@ -3196,7 +3289,7 @@ fn ensure_no_commit_loop(
 /// To get started, see the tutorial [`jj help -k tutorial`].
 ///
 /// [`jj help -k tutorial`]:
-///     https://jj-vcs.github.io/jj/latest/tutorial/
+///     https://docs.jj-vcs.dev/latest/tutorial/
 #[derive(clap::Parser, Clone, Debug)]
 #[command(name = "jj")]
 pub struct Args {
@@ -3213,6 +3306,7 @@ pub struct GlobalArgs {
     /// ancestor of the current working directory.
     #[arg(long, short = 'R', global = true, value_hint = clap::ValueHint::DirPath)]
     pub repository: Option<String>,
+
     /// Don't snapshot the working copy, and don't update it
     ///
     /// By default, Jujutsu snapshots the working copy at the beginning of every
@@ -3227,6 +3321,7 @@ pub struct GlobalArgs {
     /// implies `--ignore-working-copy`.
     #[arg(long, global = true)]
     pub ignore_working_copy: bool,
+
     /// Allow rewriting immutable commits
     ///
     /// By default, Jujutsu prevents rewriting commits in the configured set of
@@ -3237,6 +3332,7 @@ pub struct GlobalArgs {
     /// `immutable_heads()` revset or the `immutable` template keyword.
     #[arg(long, global = true)]
     pub ignore_immutable: bool,
+
     /// Operation to load the repo at
     ///
     /// Operation to load the repo at. By default, Jujutsu loads the repo at the
@@ -3259,13 +3355,10 @@ pub struct GlobalArgs {
     /// earlier operation. Doing that is equivalent to having run concurrent
     /// commands starting at the earlier operation. There's rarely a reason to
     /// do that, but it is possible.
-    #[arg(
-        long,
-        visible_alias = "at-op",
-        global = true,
-        add = ArgValueCandidates::new(complete::operations),
-    )]
+    #[arg(long, visible_alias = "at-op", global = true)]
+    #[arg(add = ArgValueCandidates::new(complete::operations))]
     pub at_operation: Option<String>,
+
     /// Enable debug logging
     #[arg(long, global = true)]
     pub debug: bool,
@@ -3279,6 +3372,7 @@ pub struct EarlyArgs {
     /// When to colorize output
     #[arg(long, value_name = "WHEN", global = true)]
     pub color: Option<ColorChoice>,
+
     /// Silence non-primary command output
     ///
     /// For example, `jj file list` will still list files, but it won't tell
@@ -3289,22 +3383,22 @@ pub struct EarlyArgs {
     // Parsing with ignore_errors will crash if this is bool, so use
     // Option<bool>.
     pub quiet: Option<bool>,
+
     /// Disable the pager
     #[arg(long, global = true, action = ArgAction::SetTrue)]
     // Parsing with ignore_errors will crash if this is bool, so use
     // Option<bool>.
     pub no_pager: Option<bool>,
+
     /// Additional configuration options (can be repeated)
     ///
     /// The name should be specified as TOML dotted keys. The value should be
     /// specified as a TOML expression. If string value isn't enclosed by any
     /// TOML constructs (such as array notation), quotes can be omitted.
-    #[arg(long, value_name = "NAME=VALUE", global = true, add = ArgValueCompleter::new(complete::leaf_config_key_value))]
+    #[arg(long, value_name = "NAME=VALUE", global = true)]
+    #[arg(add = ArgValueCompleter::new(complete::leaf_config_key_value))]
     pub config: Vec<String>,
-    /// Additional configuration options (can be repeated) (DEPRECATED)
-    // TODO: delete --config-toml in jj 0.31+
-    #[arg(long, value_name = "TOML", global = true, hide = true)]
-    pub config_toml: Vec<String>,
+
     /// Additional configuration files (can be repeated)
     #[arg(long, value_name = "PATH", global = true, value_hint = clap::ValueHint::FilePath)]
     pub config_file: Vec<String>,
@@ -3314,14 +3408,9 @@ impl EarlyArgs {
     pub(crate) fn merged_config_args(&self, matches: &ArgMatches) -> Vec<(ConfigArgKind, &str)> {
         merge_args_with(
             matches,
-            &[
-                ("config", &self.config),
-                ("config_toml", &self.config_toml),
-                ("config_file", &self.config_file),
-            ],
+            &[("config", &self.config), ("config_file", &self.config_file)],
             |id, value| match id {
                 "config" => (ConfigArgKind::Item, value.as_ref()),
-                "config_toml" => (ConfigArgKind::Toml, value.as_ref()),
                 "config_file" => (ConfigArgKind::File, value.as_ref()),
                 _ => unreachable!("unexpected id {id:?}"),
             },
@@ -3329,7 +3418,7 @@ impl EarlyArgs {
     }
 
     fn has_config_args(&self) -> bool {
-        !self.config.is_empty() || !self.config_toml.is_empty() || !self.config_file.is_empty()
+        !self.config.is_empty() || !self.config_file.is_empty()
     }
 }
 
@@ -3343,12 +3432,12 @@ pub struct RevisionArg(Cow<'static, str>);
 
 impl RevisionArg {
     /// The working-copy symbol, which is the default of the most commands.
-    pub const AT: Self = RevisionArg(Cow::Borrowed("@"));
+    pub const AT: Self = Self(Cow::Borrowed("@"));
 }
 
 impl From<String> for RevisionArg {
     fn from(s: String) -> Self {
-        RevisionArg(s.into())
+        Self(s.into())
     }
 }
 
@@ -3359,16 +3448,16 @@ impl AsRef<str> for RevisionArg {
 }
 
 impl fmt::Display for RevisionArg {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         write!(f, "{}", self.0)
     }
 }
 
 impl ValueParserFactory for RevisionArg {
-    type Parser = MapValueParser<NonEmptyStringValueParser, fn(String) -> RevisionArg>;
+    type Parser = MapValueParser<NonEmptyStringValueParser, fn(String) -> Self>;
 
     fn value_parser() -> Self::Parser {
-        NonEmptyStringValueParser::new().map(RevisionArg::from)
+        NonEmptyStringValueParser::new().map(Self::from)
     }
 }
 
@@ -3426,24 +3515,24 @@ fn resolve_default_command(
         .ignore_errors(true);
     let matches = app_clone.try_get_matches_from(&string_args).ok();
 
-    if let Some(matches) = matches {
-        if matches.subcommand_name().is_none() {
-            let args = get_string_or_array(config, "ui.default-command").optional()?;
-            if args.is_none() {
-                writeln!(
-                    ui.hint_default(),
-                    "Use `jj -h` for a list of available commands."
-                )?;
-                writeln!(
-                    ui.hint_no_heading(),
-                    "Run `jj config set --user ui.default-command log` to disable this message."
-                )?;
-            }
-            let default_command = args.unwrap_or_else(|| vec!["log".to_string()]);
-
-            // Insert the default command directly after the path to the binary.
-            string_args.splice(1..1, default_command);
+    if let Some(matches) = matches
+        && matches.subcommand_name().is_none()
+    {
+        let args = get_string_or_array(config, "ui.default-command").optional()?;
+        if args.is_none() {
+            writeln!(
+                ui.hint_default(),
+                "Use `jj -h` for a list of available commands."
+            )?;
+            writeln!(
+                ui.hint_no_heading(),
+                "Run `jj config set --user ui.default-command log` to disable this message."
+            )?;
         }
+        let default_command = args.unwrap_or_else(|| vec!["log".to_string()]);
+
+        // Insert the default command directly after the path to the binary.
+        string_args.splice(1..1, default_command);
     }
     Ok(string_args)
 }
@@ -3473,31 +3562,31 @@ fn resolve_aliases(
     loop {
         let app_clone = app.clone().allow_external_subcommands(true);
         let matches = app_clone.try_get_matches_from(&string_args).ok();
-        if let Some((command_name, submatches)) = matches.as_ref().and_then(|m| m.subcommand()) {
-            if !real_commands.contains(command_name) {
-                let alias_name = command_name.to_string();
-                let alias_args = submatches
-                    .get_many::<OsString>("")
-                    .unwrap_or_default()
-                    .map(|arg| arg.to_str().unwrap().to_string())
-                    .collect_vec();
-                if resolved_aliases.contains(&*alias_name) {
-                    return Err(user_error(format!(
-                        "Recursive alias definition involving `{alias_name}`"
-                    )));
-                }
-                if let Some(&alias_name) = defined_aliases.get(&*alias_name) {
-                    let alias_definition: Vec<String> = config.get(["aliases", alias_name])?;
-                    assert!(string_args.ends_with(&alias_args));
-                    string_args.truncate(string_args.len() - 1 - alias_args.len());
-                    string_args.extend(alias_definition);
-                    string_args.extend_from_slice(&alias_args);
-                    resolved_aliases.insert(alias_name);
-                    continue;
-                } else {
-                    // Not a real command and not an alias, so return what we've resolved so far
-                    return Ok(string_args);
-                }
+        if let Some((command_name, submatches)) = matches.as_ref().and_then(|m| m.subcommand())
+            && !real_commands.contains(command_name)
+        {
+            let alias_name = command_name.to_string();
+            let alias_args = submatches
+                .get_many::<OsString>("")
+                .unwrap_or_default()
+                .map(|arg| arg.to_str().unwrap().to_string())
+                .collect_vec();
+            if resolved_aliases.contains(&*alias_name) {
+                return Err(user_error(format!(
+                    "Recursive alias definition involving `{alias_name}`"
+                )));
+            }
+            if let Some(&alias_name) = defined_aliases.get(&*alias_name) {
+                let alias_definition: Vec<String> = config.get(["aliases", alias_name])?;
+                assert!(string_args.ends_with(&alias_args));
+                string_args.truncate(string_args.len() - 1 - alias_args.len());
+                string_args.extend(alias_definition);
+                string_args.extend_from_slice(&alias_args);
+                resolved_aliases.insert(alias_name);
+                continue;
+            } else {
+                // Not a real command and not an alias, so return what we've resolved so far
+                return Ok(string_args);
             }
         }
         // No more alias commands, or hit unknown option
@@ -3678,7 +3767,6 @@ pub fn format_template<C: Clone>(ui: &Ui, arg: &C, template: &TemplateRenderer<C
 /// CLI command builder and runner.
 #[must_use]
 pub struct CliRunner<'a> {
-    // fastjj: arguments can arrive over stdin without changing process argv.
     input_args: Vec<OsString>,
     config_overrides: Vec<ConfigLayer>,
     tracing_subscription: TracingSubscription,
@@ -3711,7 +3799,7 @@ impl<'a> CliRunner<'a> {
     pub fn init() -> Self {
         let tracing_subscription = TracingSubscription::init();
         crate::cleanup_guard::init();
-        CliRunner {
+        Self {
             input_args: env::args_os().collect(),
             config_overrides: vec![],
             tracing_subscription,
@@ -3891,16 +3979,20 @@ impl<'a> CliRunner<'a> {
             .map_err(|_| {
                 user_error_with_hint(
                     "Could not determine current directory",
-                    "Did you update to a commit where the directory doesn't exist?",
+                    "Did you update to a commit where the directory doesn't exist or can't be \
+                     accessed?",
                 )
             })?;
-        let mut config_env = ConfigEnv::from_environment(ui);
+        let mut config_env = ConfigEnv::from_environment();
         let mut last_config_migration_descriptions = Vec::new();
         let mut migrate_config = |config: &mut StackedConfig| -> Result<(), CommandError> {
             last_config_migration_descriptions =
                 jj_lib::config::migrate(config, &self.config_migrations)?;
             Ok(())
         };
+
+        // Initial load: user, repo, and workspace-level configs for
+        // alias/default-command resolution
         // Use cwd-relative workspace configs to resolve default command and
         // aliases. WorkspaceLoader::init() won't do any heavy lifting other
         // than the path resolution.
@@ -3912,13 +4004,15 @@ impl<'a> CliRunner<'a> {
         if let Ok(loader) = &maybe_cwd_workspace_loader {
             config_env.reset_repo_path(loader.repo_path());
             config_env.reload_repo_config(&mut raw_config)?;
+            config_env.reset_workspace_path(loader.workspace_root());
+            config_env.reload_workspace_config(&mut raw_config)?;
         }
         raw_config.as_mut().extend_layers(self.config_overrides.iter().cloned());
         let mut config = config_env.resolve_config(&raw_config)?;
         migrate_config(&mut config)?;
         ui.reset(&config)?;
 
-        if env::var_os("COMPLETE").is_some() {
+        if env::var_os("COMPLETE").is_some_and(|v| !v.is_empty() && v != "0") {
             return handle_shell_completion(&Ui::null(), &self.app, &config, &cwd);
         }
 
@@ -3930,12 +4024,6 @@ impl<'a> CliRunner<'a> {
             config = config_env.resolve_config(&raw_config)?;
             migrate_config(&mut config)?;
             ui.reset(&config)?;
-        }
-        if !args.config_toml.is_empty() {
-            writeln!(
-                ui.warning_default(),
-                "--config-toml is deprecated; use --config or --config-file instead."
-            )?;
         }
 
         if args.has_config_args() {
@@ -3964,6 +4052,8 @@ impl<'a> CliRunner<'a> {
                 .map_err(|err| map_workspace_load_error(err, Some(path)))?;
             config_env.reset_repo_path(loader.repo_path());
             config_env.reload_repo_config(&mut raw_config)?;
+            config_env.reset_workspace_path(loader.workspace_root());
+            config_env.reload_workspace_config(&mut raw_config)?;
             Ok(loader)
         } else {
             maybe_cwd_workspace_loader
@@ -3975,8 +4065,19 @@ impl<'a> CliRunner<'a> {
         ui.reset(&config)?;
 
         // Print only the last migration messages to omit duplicates.
-        for desc in &last_config_migration_descriptions {
-            writeln!(ui.warning_default(), "Deprecated config: {desc}")?;
+        for (source, desc) in &last_config_migration_descriptions {
+            let source_str = match source {
+                ConfigSource::Default => "default-provided",
+                ConfigSource::EnvBase | ConfigSource::EnvOverrides => "environment-provided",
+                ConfigSource::User => "user-level",
+                ConfigSource::Repo => "repo-level",
+                ConfigSource::Workspace => "workspace-level",
+                ConfigSource::CommandArg => "CLI-provided",
+            };
+            writeln!(
+                ui.warning_default(),
+                "Deprecated {source_str} config: {desc}"
+            )?;
         }
 
         if args.global_args.repository.is_some() {
@@ -4018,7 +4119,7 @@ impl<'a> CliRunner<'a> {
 
     #[must_use]
     #[instrument(skip(self))]
-    pub fn run(mut self) -> ExitCode {
+    pub fn run(mut self) -> u8 {
         // Tell crossterm to ignore NO_COLOR (we check it ourselves)
         crossterm::style::force_color_output(true);
         let config = config_from_environment(self.config_layers.drain(..));
@@ -4035,17 +4136,20 @@ impl<'a> CliRunner<'a> {
 
 fn map_clap_cli_error(err: clap::Error, ui: &Ui, config: &StackedConfig) -> CommandError {
     if let Some(ContextValue::String(cmd)) = err.get(ContextKind::InvalidSubcommand) {
+        let remove_useless_error_context = |mut err: clap::Error| {
+            // Clap suggests unhelpful subcommands, e.g. `config` for `clone`.
+            // We don't want suggestions when we know this isn't a misspelling.
+            err.remove(ContextKind::SuggestedSubcommand);
+            err.remove(ContextKind::Suggested); // Remove an empty line
+            err.remove(ContextKind::Usage); // Also unhelpful for these errors.
+            err
+        };
         match cmd.as_str() {
             // git commands that a brand-new user might type during their first
             // experiments with `jj`
             "clone" | "init" => {
                 let cmd = cmd.clone();
-                let mut err = err;
-                // Clap suggests an unhelpful subcommand, e.g. `config` for `clone`.
-                err.remove(ContextKind::SuggestedSubcommand);
-                err.remove(ContextKind::Suggested); // Remove an empty line
-                err.remove(ContextKind::Usage);
-                return CommandError::from(err)
+                return CommandError::from(remove_useless_error_context(err))
                     .hinted(format!(
                         "You probably want `jj git {cmd}`. See also `jj help git`."
                     ))
@@ -4053,19 +4157,23 @@ fn map_clap_cli_error(err: clap::Error, ui: &Ui, config: &StackedConfig) -> Comm
                         r#"You can configure `aliases.{cmd} = ["git", "{cmd}"]` if you want `jj {cmd}` to work and always use the Git backend."#
                     ));
             }
+            "amend" => {
+                return CommandError::from(remove_useless_error_context(err))
+                    .hinted(
+                        r#"You probably want `jj squash`. You can configure `aliases.amend = ["squash"]` if you want `jj amend` to work."#);
+            }
             _ => {}
         }
     }
     if let (Some(ContextValue::String(arg)), Some(ContextValue::String(value))) = (
         err.get(ContextKind::InvalidArg),
         err.get(ContextKind::InvalidValue),
-    ) {
-        if arg.as_str() == "--template <TEMPLATE>" && value.is_empty() {
-            // Suppress the error, it's less important than the original error.
-            if let Ok(template_aliases) = load_template_aliases(ui, config) {
-                return CommandError::from(err)
-                    .hinted(format_template_aliases_hint(&template_aliases));
-            }
+    ) && arg.as_str() == "--template <TEMPLATE>"
+        && value.is_empty()
+    {
+        // Suppress the error, it's less important than the original error.
+        if let Ok(template_aliases) = load_template_aliases(ui, config) {
+            return CommandError::from(err).hinted(format_template_aliases_hint(&template_aliases));
         }
     }
     CommandError::from(err)
@@ -4089,9 +4197,9 @@ fn warn_if_args_mismatch(
     app: &Command,
     config: &StackedConfig,
     expected_args: &[String],
-    input_args: &[OsString],
+    original_args: &[OsString],
 ) -> Result<(), CommandError> {
-    let new_string_args = expand_args(ui, app, input_args.iter().cloned(), config).ok();
+    let new_string_args = expand_args(ui, app, original_args.iter().cloned(), config).ok();
     if new_string_args.as_deref() != Some(expected_args) {
         writeln!(
             ui.warning_default(),

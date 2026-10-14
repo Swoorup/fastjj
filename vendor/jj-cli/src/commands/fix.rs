@@ -19,27 +19,31 @@ use std::process::Stdio;
 
 use clap_complete::ArgValueCompleter;
 use itertools::Itertools as _;
-use jj_lib::backend::CommitId;
 use jj_lib::backend::FileId;
+use jj_lib::commit::Commit;
 use jj_lib::fileset;
 use jj_lib::fileset::FilesetDiagnostics;
 use jj_lib::fileset::FilesetExpression;
-use jj_lib::fix::fix_files;
 use jj_lib::fix::FileToFix;
 use jj_lib::fix::FixError;
 use jj_lib::fix::ParallelFileFixer;
+use jj_lib::fix::fix_files;
 use jj_lib::matchers::Matcher;
+use jj_lib::repo::Repo as _;
 use jj_lib::repo_path::RepoPathUiConverter;
+use jj_lib::revset::RevsetIteratorExt as _;
 use jj_lib::settings::UserSettings;
 use jj_lib::store::Store;
 use pollster::FutureExt as _;
+use tokio::io::AsyncReadExt as _;
 use tracing::instrument;
 
 use crate::cli_util::CommandHelper;
 use crate::cli_util::RevisionArg;
+use crate::cli_util::print_unmatched_explicit_paths;
+use crate::command_error::CommandError;
 use crate::command_error::config_error;
 use crate::command_error::print_parse_diagnostics;
-use crate::command_error::CommandError;
 use crate::complete;
 use crate::config::CommandNameAndArgs;
 use crate::ui::Ui;
@@ -50,6 +54,10 @@ use crate::ui::Ui;
 /// code formatting tools to revisions that may not be properly formatted yet.
 /// It can also be used to modify files with other tools like `sed` or `sort`.
 ///
+/// The modification made by `jj fix` can be reviewed by `jj op show -p`.
+///
+/// ### How it works
+///
 /// The changed files in the given revisions will be updated with any fixes
 /// determined by passing their file content through any external tools the user
 /// has configured for those files. Descendants will also be updated by passing
@@ -58,30 +66,16 @@ use crate::ui::Ui;
 /// with existing conflicts will be updated on all sides of the conflict, which
 /// can potentially increase or decrease the number of conflict markers.
 ///
-/// The external tools must accept the current file content on standard input,
-/// and return the updated file content on standard output. A tool's output will
-/// not be used unless it exits with a successful exit code. Output on standard
-/// error will be passed through to the terminal.
+/// ### Configuration
 ///
-/// Tools are defined in a table where the keys are arbitrary identifiers and
-/// the values have the following properties:
-///  - `command`: The arguments used to run the tool. The first argument is the
-///    path to an executable file. Arguments can contain the substring `$path`,
-///    which will be replaced with the repo-relative path of the file being
-///    fixed. It is useful to provide the path to tools that include the path in
-///    error messages, or behave differently based on the directory or file
-///    name.
-///  - `patterns`: Determines which files the tool will affect. If this list is
-///    empty, no files will be affected by the tool. If there are multiple
-///    patterns, the tool is applied only once to each file in the union of the
-///    patterns.
-///  - `enabled`: Enables or disables the tool. If omitted, the tool is enabled.
-///    This is useful for defining disabled tools in user configuration that can
-///    be enabled in individual repositories with one config setting.
+/// See `jj help -k config` chapter `Code formatting and other file content
+/// transformations` to understand how to configure your tools.
 ///
-/// For example, the following configuration defines how two code formatters
-/// (`clang-format` and `black`) will apply to three different file extensions
-/// (`.cc`, `.h`, and `.py`):
+/// ### Execution Example
+///
+/// Let's consider the following configuration is set. We have two code
+/// formatters (`clang-format` and `black`), which apply to three different
+/// file extensions (`.cc`, `.h`, and `.py`):
 ///
 /// ```toml
 /// [fix.tools.clang-format]
@@ -94,26 +88,76 @@ use crate::ui::Ui;
 /// patterns = ["glob:'**/*.py'"]
 /// ```
 ///
-/// Execution order of tools that affect the same file is deterministic, but
-/// currently unspecified, and may change between releases. If two tools affect
-/// the same file, the second tool to run will receive its input from the
-/// output of the first tool.
+/// Now, let's see what would happen to the following history, when executing
+/// `jj fix`.
+///
+/// ```text
+/// C (mutable)
+/// |  Modifies file: foo.py
+/// |
+/// B @ (working copy - mutable)
+/// |  Modifies file: README.md
+/// |
+/// A (mutable)
+/// |  Modifies files: src/bar.cc and src/bar.h
+/// |
+/// X (immutable)
+/// ```
+///
+/// By default, `jj fix` will modify revisions that matches the revset
+/// `reachable(@, mutable())` (see `jj help -k revsets`) which corresponds to
+/// the revisions `A`, `B` and `C` here.
+///
+/// The following operations will then happen:
+///
+/// - For revision `A`, content from this revision for files `src/bar.cc` and
+///   `src/bar.h` will each be provided to `clang-format` and the result output
+///   will be used to recreate revision `A` which we will call `A'`. All other
+///   files are untouched.
+/// - For revision `B`, same thing happen for files `src/bar.cc` and `src/bar.h`
+///   Their content from revision `B` will go through `clang-format`. The file
+///   `README.md` as any other files, are untouched as no pattern matches it. We
+///   obtain revision `B'`.
+/// - For revision `C`, `src/bar.cc` and `src/bar.h` goes through `clang-format`
+///   and file `foo.py` is fixed using `black`. Any other file is untouched. We
+///   obtain revision `C'`.
+///
+/// ```text
+/// C (mutable)                    /-> C'
+/// |  src/bar.cc -> clang-format -|   |
+/// |  src/bar.h --> clang-format -|   |
+/// |  foo.py -----> black --------|   |
+/// |  * --------------------------/   |
+/// |                                  |
+/// B @ (working copy - mutable)   /-> B' @
+/// |  src/bar.cc -> clang-format -|   |
+/// |  src/bar.h --> clang-format -|   |
+/// |  * --------------------------|   |
+/// |                                  |
+/// A (mutable)                    /-> A'
+/// |  src/bar.cc -> clang-format -|   |
+/// |  src/bar.h --> clang-format -|   |
+/// |  * --------------------------/   |
+/// |                                  |
+/// X (immutable)                      X
+/// ```
+///
+/// The revisions are now all correctly formatted according to the
+/// configuration.
 #[derive(clap::Args, Clone, Debug)]
 #[command(verbatim_doc_comment)]
 pub(crate) struct FixArgs {
     /// Fix files in the specified revision(s) and their descendants. If no
     /// revisions are specified, this defaults to the `revsets.fix` setting, or
     /// `reachable(@, mutable())` if it is not set.
-    #[arg(
-        long,
-        short,
-        value_name = "REVSETS",
-        add = ArgValueCompleter::new(complete::revset_expression_mutable),
-    )]
+    #[arg(long, short, value_name = "REVSETS")]
+    #[arg(add = ArgValueCompleter::new(complete::revset_expression_mutable))]
     source: Vec<RevisionArg>,
+
     /// Fix only these paths
     #[arg(value_name = "FILESETS", value_hint = clap::ValueHint::AnyPath)]
     paths: Vec<String>,
+
     /// Fix unchanged files in addition to changed ones. If no paths are
     /// specified, all files in the repo will be fixed.
     #[arg(long)]
@@ -128,31 +172,59 @@ pub(crate) fn cmd_fix(
 ) -> Result<(), CommandError> {
     let mut workspace_command = command.workspace_helper(ui)?;
     let workspace_root = workspace_command.workspace_root().to_owned();
+    let path_converter = workspace_command.path_converter().to_owned();
     let tools_config = get_tools_config(ui, workspace_command.settings())?;
-    let root_commits: Vec<CommitId> = if args.source.is_empty() {
+    let target_expr = if args.source.is_empty() {
         let revs = workspace_command.settings().get_string("revsets.fix")?;
         workspace_command.parse_revset(ui, &RevisionArg::from(revs))?
     } else {
         workspace_command.parse_union_revsets(ui, &args.source)?
     }
-    .evaluate_to_commit_ids()?
-    .try_collect()?;
-    workspace_command.check_rewritable(root_commits.iter())?;
-    let matcher = workspace_command
-        .parse_file_patterns(ui, &args.paths)?
-        .to_matcher();
+    .resolve()?;
+    workspace_command.check_rewritable_expr(&target_expr)?;
+
+    let repo = workspace_command.repo();
+
+    let commits: Vec<Commit> = target_expr
+        .descendants()
+        .evaluate(repo.as_ref())?
+        .iter()
+        .commits(repo.store())
+        .try_collect()?;
+
+    let commit_ids = commits
+        .iter()
+        .map(|commit| commit.id().clone())
+        .collect_vec();
+
+    let trees: Vec<_> = commits.iter().map(|commit| commit.tree()).collect();
+
+    let fileset_expression = workspace_command.parse_file_patterns(ui, &args.paths)?;
+    let matcher = fileset_expression.to_matcher();
 
     let mut tx = workspace_command.start_transaction();
     let mut parallel_fixer = ParallelFileFixer::new(|store, file_to_fix| {
-        fix_one_file(&workspace_root, &tools_config, store, file_to_fix)
+        fix_one_file(
+            ui,
+            &workspace_root,
+            &path_converter,
+            &tools_config,
+            store,
+            file_to_fix,
+        )
+        .block_on()
     });
+
+    print_unmatched_explicit_paths(ui, tx.base_workspace_helper(), &fileset_expression, &trees)?;
+
     let summary = fix_files(
-        root_commits,
+        commit_ids,
         &matcher,
         args.include_unchanged_files,
         tx.repo_mut(),
         &mut parallel_fixer,
-    )?;
+    )
+    .block_on()?;
     writeln!(
         ui.status(),
         "Fixed {} commits of {} checked.",
@@ -174,8 +246,10 @@ pub(crate) fn cmd_fix(
 ///
 /// TODO: Better error handling so we can tell the user what went wrong with
 /// each failed input.
-fn fix_one_file(
+async fn fix_one_file(
+    ui: &Ui,
     workspace_root: &Path,
+    path_converter: &RepoPathUiConverter,
     tools_config: &ToolsConfig,
     store: &Store,
     file_to_fix: &FileToFix,
@@ -190,11 +264,15 @@ fn fix_one_file(
         // subsequent matching tool gets its input from the previous matching tool's
         // output.
         let mut old_content = vec![];
-        let mut read = store.read_file(&file_to_fix.repo_path, &file_to_fix.file_id)?;
-        read.read_to_end(&mut old_content)?;
+        let mut read = store
+            .read_file(&file_to_fix.repo_path, &file_to_fix.file_id)
+            .await?;
+        read.read_to_end(&mut old_content).await?;
         let new_content = matching_tools.fold(old_content.clone(), |prev_content, tool_config| {
             match run_tool(
+                ui,
                 workspace_root,
+                path_converter,
                 &tool_config.command,
                 file_to_fix,
                 &prev_content,
@@ -203,14 +281,14 @@ fn fix_one_file(
                 // TODO: Because the stderr is passed through, this isn't always failing
                 // silently, but it should do something better will the exit code, tool
                 // name, etc.
-                Err(_) => prev_content,
+                Err(()) => prev_content,
             }
         });
         if new_content != old_content {
             // TODO: send futures back over channel
             let new_file_id = store
                 .write_file(&file_to_fix.repo_path, &mut new_content.as_slice())
-                .block_on()?;
+                .await?;
             return Ok(Some(new_file_id));
         }
     }
@@ -226,35 +304,73 @@ fn fix_one_file(
 /// unless the command introduced changes. Returns `None` if there were any
 /// failures when starting, stopping, or communicating with the subprocess.
 fn run_tool(
+    ui: &Ui,
     workspace_root: &Path,
+    path_converter: &RepoPathUiConverter,
     tool_command: &CommandNameAndArgs,
     file_to_fix: &FileToFix,
     old_content: &[u8],
 ) -> Result<Vec<u8>, ()> {
-    // TODO: Pipe stderr so we can tell the user which commit, file, and tool it is
-    // associated with.
     let mut vars: HashMap<&str, &str> = HashMap::new();
     vars.insert("path", file_to_fix.repo_path.as_internal_file_string());
+    // TODO: workspace_root.to_str() returns None if the workspace path is not
+    // UTF-8, but we ignore that failure so `jj fix` still runs in that
+    // situation. Maybe we should do something like substituting bytes instead
+    // of strings so we can handle any Path here.
+    if let Some(root) = workspace_root.to_str() {
+        vars.insert("root", root);
+    }
     let mut command = tool_command.to_command_with_variables(&vars);
     tracing::debug!(?command, ?file_to_fix.repo_path, "spawning fix tool");
-    let mut child = command
+    let mut child = match command
         .current_dir(workspace_root)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
         .spawn()
-        .or(Err(()))?;
-    let mut stdin = child.stdin.take().unwrap();
+    {
+        Ok(child) => child,
+        Err(_) => {
+            writeln!(
+                ui.warning_default(),
+                "Failed to start `{}`",
+                tool_command.split_name(),
+            )
+            .ok();
+            return Err(());
+        }
+    };
+    let mut stdin = child.stdin.take().expect(
+        "The child process is created with piped stdin, and it's our first access to stdin.",
+    );
     let output = std::thread::scope(|s| {
         s.spawn(move || {
             stdin.write_all(old_content).ok();
         });
-        Some(child.wait_with_output().or(Err(())))
-    })
-    .unwrap()?;
+        child.wait_with_output().or(Err(()))
+    })?;
     tracing::debug!(?command, ?output.status, "fix tool exited:");
+    if !output.stderr.is_empty() {
+        let mut stderr = ui.stderr();
+        writeln!(
+            stderr,
+            "{}:",
+            path_converter.format_file_path(&file_to_fix.repo_path)
+        )
+        .ok();
+        stderr.write_all(&output.stderr).ok();
+        writeln!(stderr).ok();
+    }
     if output.status.success() {
         Ok(output.stdout)
     } else {
+        writeln!(
+            ui.warning_default(),
+            "Fix tool `{}` exited with non-zero exit code for `{}`",
+            tool_command.split_name(),
+            path_converter.format_file_path(&file_to_fix.repo_path)
+        )
+        .ok();
         Err(())
     }
 }

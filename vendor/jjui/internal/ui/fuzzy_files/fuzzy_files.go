@@ -1,0 +1,290 @@
+package fuzzy_files
+
+import (
+	"fmt"
+	"strconv"
+	"strings"
+	"time"
+
+	tea "charm.land/bubbletea/v2"
+	"charm.land/lipgloss/v2"
+	"github.com/idursun/jjui/internal/config"
+	"github.com/idursun/jjui/internal/jj"
+	"github.com/idursun/jjui/internal/ui/common"
+	"github.com/idursun/jjui/internal/ui/fuzzy_search"
+	"github.com/idursun/jjui/internal/ui/intents"
+	"github.com/idursun/jjui/internal/ui/layout"
+	"github.com/idursun/jjui/internal/ui/render"
+	"github.com/idursun/jjui/internal/ui/revisions"
+	"github.com/idursun/jjui/internal/ui/theme"
+	"github.com/sahilm/fuzzy"
+)
+
+type fuzzyFiles struct {
+	// restore
+	revset string
+	commit *jj.Commit
+
+	cursor int
+	// enabled with ctrl+t again
+	// live preview of revset and rev-diff
+	revsetPreview bool
+	debounceTag   int
+
+	// search state
+	paths            []jj.FileName
+	repoRoot         string
+	workingDirectory string
+	max              int
+	matches          fuzzy.Matches
+}
+
+var debounceDuration = 250 * time.Millisecond
+
+type debouncePreview int
+
+type initMsg struct{}
+
+func newCmd(msg tea.Msg) tea.Cmd {
+	return func() tea.Msg {
+		return msg
+	}
+}
+
+func (fzf *fuzzyFiles) Init() tea.Cmd {
+	return newCmd(initMsg{})
+}
+
+func (fzf *fuzzyFiles) Update(msg tea.Msg) tea.Cmd {
+	switch msg := msg.(type) {
+	case intents.Intent:
+		return fzf.handleIntent(msg)
+	case initMsg:
+		fzf.search("")
+	case fuzzy_search.SearchMsg:
+		fzf.search(msg.Input)
+		if fzf.revsetPreview {
+			fzf.debounceTag++
+			tag := debouncePreview(fzf.debounceTag)
+			return tea.Tick(debounceDuration, func(_ time.Time) tea.Msg {
+				return tag
+			})
+		}
+	case debouncePreview:
+		if int(msg) != fzf.debounceTag {
+			return nil
+		}
+		if fzf.revsetPreview {
+			return tea.Batch(
+				fzf.updateRevSet(),
+				newCmd(common.ShowPreview{}),
+			)
+		}
+	}
+	return nil
+}
+
+func (fzf *fuzzyFiles) updateRevSet() tea.Cmd {
+	path := fzf.selectedPath()
+	revset := fzf.revset
+	if !path.IsEmpty() {
+		revset = fmt.Sprintf("files(%s)", path.Escaped())
+	}
+	return common.UpdateRevSet(revset)
+}
+
+func skipSearch() tea.Msg {
+	return nil
+}
+
+func (fzf *fuzzyFiles) handleIntent(intent intents.Intent) tea.Cmd {
+	switch intent := intent.(type) {
+	case intents.FileSearchNavigate:
+		if fzf.revsetPreview {
+			return revisions.RevisionsCmd(intents.Navigate{Delta: fileSearchNavigateDelta(intent.Delta)})
+		}
+		fzf.moveCursor(intent.Delta)
+		return skipSearch
+	case intents.FileSearchCancel:
+		return common.UpdateRevSet(fzf.revset)
+	case intents.FileSearchEdit:
+		path := fzf.selectedPath()
+		return newCmd(common.ExecMsg{
+			Line: config.GetDefaultEditor() + " " + path.ShellEscaped(),
+			Mode: common.ExecShell,
+		})
+	case intents.FileSearchTogglePreview:
+		fzf.revsetPreview = !fzf.revsetPreview
+		if fzf.revsetPreview {
+			return tea.Batch(
+				newCmd(common.ShowPreview{}),
+				fzf.updateRevSet(),
+			)
+		}
+		return fzf.updateRevSet()
+	case intents.FileSearchAccept:
+		return fzf.updateRevSet()
+	case intents.FileSearchPreviewScroll:
+		if !fzf.revsetPreview {
+			switch intent.Kind {
+			case intents.PreviewScrollUp:
+				fzf.moveCursor(1)
+				return skipSearch
+			case intents.PreviewScrollDown:
+				fzf.moveCursor(-1)
+				return skipSearch
+			default:
+				return nil
+			}
+		}
+		// Dispatch to ui.go which handles preview scroll intents
+		return func() tea.Msg {
+			return intents.PreviewScroll(intent)
+		}
+	}
+	return nil
+}
+
+func (fzf *fuzzyFiles) moveCursor(inc int) {
+	n := fzf.cursor + inc
+	l := len(fzf.matches) - 1
+	if n > l {
+		n = 0
+	}
+	if n < 0 {
+		n = l
+	}
+	fzf.cursor = n
+}
+
+func (fzf *fuzzyFiles) Max() int {
+	return fzf.max
+}
+
+func (fzf *fuzzyFiles) Matches() fuzzy.Matches {
+	return fzf.matches
+}
+
+func (fzf *fuzzyFiles) SelectedMatch() int {
+	return fzf.cursor
+}
+
+func (fzf *fuzzyFiles) Len() int {
+	return len(fzf.paths)
+}
+
+func (fzf *fuzzyFiles) String(i int) string {
+	n := len(fzf.paths)
+	if i < 0 || i >= n {
+		return ""
+	}
+	return fzf.paths[i].Display(fzf.repoRoot, fzf.workingDirectory)
+}
+
+func (fzf *fuzzyFiles) selectedPath() jj.FileName {
+	if fzf.cursor < 0 || fzf.cursor >= len(fzf.matches) {
+		return jj.FileName{}
+	}
+	index := fzf.matches[fzf.cursor].Index
+	if index < 0 || index >= len(fzf.paths) {
+		return jj.FileName{}
+	}
+	return fzf.paths[index]
+}
+
+func (fzf *fuzzyFiles) search(input string) {
+	src := &fuzzy_search.RefinedSource{Source: fzf}
+	fzf.cursor = 0
+	// Generate all candidate matches; the display is capped to max in the view.
+	fzf.matches = src.Search(input, fzf.Len())
+}
+
+func (fzf *fuzzyFiles) ViewRect(dl *render.DisplayContext, box layout.Box) {
+	// Cap the list height to half of the available view height.
+	// Reserve one line for the title.
+	if desired := box.R.Dy()/2 - 1; desired > 0 {
+		fzf.max = desired
+	}
+	content := fzf.viewContent()
+	if content == "" {
+		return
+	}
+	_, h := lipgloss.Size(content)
+	rect := layout.Rect(box.R.Min.X, box.R.Max.Y-h, box.R.Dx(), h)
+	background := theme.DefaultPalette.Get("status", "", "text", false)
+	dl.AddFill(rect, ' ', background, render.ZFuzzyOverlay)
+	dl.AddDraw(rect, content, render.ZFuzzyOverlay)
+	dl.AddHighlight(rect, background, render.ZFuzzyOverlay)
+}
+
+func (fzf *fuzzyFiles) viewContent() string {
+	shown := len(fzf.matches)
+	if shown == 0 {
+		return ""
+	}
+	title := theme.DefaultPalette.Get("status", "", "title", false).Render(
+		"  ",
+		strconv.Itoa(shown),
+		"of",
+		strconv.Itoa(len(fzf.paths)),
+		"paths present at revision",
+		fzf.commit.GetChangeId(),
+		" ",
+	)
+	entries := fuzzy_search.View(fzf)
+	return lipgloss.JoinVertical(0, title, entries)
+}
+
+func NewModel(msg common.FileSearchMsg) fuzzy_search.Model {
+	model := &fuzzyFiles{
+		revset:           msg.Revset,
+		max:              30,
+		commit:           msg.Commit,
+		paths:            buildPathEntries(msg.RawFileOut),
+		repoRoot:         msg.RepoRoot,
+		workingDirectory: msg.WorkingDirectory,
+	}
+	return model
+}
+
+func buildPathEntries(rawFileOut []byte) []jj.FileName {
+	lines := strings.Split(string(rawFileOut), "\n")
+	entries := make([]jj.FileName, 0, len(lines))
+	seen := make(map[string]struct{}, len(lines))
+
+	add := func(entry string) {
+		if entry == "" {
+			return
+		}
+		if _, ok := seen[entry]; ok {
+			return
+		}
+		seen[entry] = struct{}{}
+		entries = append(entries, jj.NewFileName(entry))
+	}
+
+	for _, file := range lines {
+		if file == "" {
+			continue
+		}
+
+		// jj repo paths are slash-separated on all platforms.
+		// Add each ancestor directory (e.g. "a/b/c.go" adds "a/" then "a/b/").
+		for i := 0; i < len(file); i++ {
+			if file[i] == '/' {
+				add(file[:i+1])
+			}
+		}
+
+		add(file)
+	}
+
+	return entries
+}
+
+func fileSearchNavigateDelta(delta int) int {
+	if delta < 0 {
+		return 1
+	}
+	return -1
+}

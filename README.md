@@ -4,8 +4,8 @@ A Rust Jujutsu client that performs repository operations in the current process
 and allows worker threads, while preventing subprocesses from exposing repository
 names, paths, or remote URLs in their command lines.
 
-fastjj embeds **jj 0.29.0**, the final jj release with an in-process libgit2 Git
-transport. It works with jj's repository format and keeps jj's commands, revsets,
+fastjj embeds **jj 0.37.0**, with an in-process libgit2 implementation of its Git
+transport. It includes **fastjjui**, a privacy-preserving fork of jjui 0.10.11. It works with jj's repository format and keeps jj's commands, revsets,
 templates, automatic working-copy snapshots, operation history, bookmarks,
 rebasing, and conflict handling. It does not launch an installed `jj` or `git`.
 
@@ -31,6 +31,22 @@ On macOS, install Xcode Command Line Tools with `xcode-select --install` and
 pkg-config with `brew install pkg-config`, then run the same Cargo commands.
 The built executable is `target/release/fastjj`. Source installation is from this
 checkout; no crates.io release is published. TLS verification remains enabled.
+
+## jjui
+
+Run `fastjjui` inside your repository. It supports jjui's graph, previews,
+bookmarks, history editing, workspaces, and Git fetch/push while sending command
+arguments and credentials over private inherited descriptors. Install it beside
+`fastjj`; both binaries are included in releases and the Nix package.
+
+```sh
+nix run github:Swoorup/fastjj#jjui
+```
+
+Use this bundled fork for private UI operation. Unmodified jjui still exposes
+its backend command arguments, even when `jj` is a symlink to fastjj.
+[The jjui guide](docs/jjui.md) covers supported workflows, SSH credential prompts,
+configuration, source builds, and the restrictions on external shell actions.
 
 ## Nix
 
@@ -106,10 +122,10 @@ Published assets are never overwritten: a repeated tag build must match the
 existing assets, or the publish job fails and a new version is needed. No tag is
 created by the workflow itself.
 
-Each `.tar.gz` includes the executable, documentation, license, and
+Each `.tar.gz` includes `fastjj` and `fastjjui`, documentation, licenses, and
 `build-info.json` recording the exact source commit. An adjacent `.sha256` file
-provides its checksum. After extracting an archive, install its `fastjj` executable
-in a directory on your PATH and run `fastjj privacy`.
+provides its checksum. After extracting an archive, install both executables
+in the same directory on your PATH and run `fastjj privacy`.
 
 ```sh
 # Linux
@@ -257,7 +273,7 @@ Run repository maintenance separately when needed.
 
 See [the privacy model](docs/privacy.md) for the guarantees, kernel policy, and
 scope of protection. Existing repositories created by newer jj versions are
-subject to jj 0.29's format compatibility; back up repositories before migrating
+subject to jj 0.37's format compatibility; back up repositories before migrating
 between versions.
 
 ## Development and verification
@@ -305,7 +321,6 @@ network services.
 ## Upstream and license
 
 Apache-2.0. The CLI fork is in `vendor/jj-cli`, with upstream notices retained.
-[NOTICE](NOTICE) records its source and changes. `jj-lib` stays an unmodified,
-version-pinned dependency. To update the embedded jj release, retain in-process
-transport and rerun both the kernel and syscall-trace tests; newer upstream
-versions cannot be substituted without a transport implementation change.
+[NOTICE](NOTICE) records its source and changes. `vendor/jj-lib` contains the native Git transport adaptation. The jjui fork in
+`vendor/jjui` retains its MIT license. To update either upstream, preserve the
+private process boundaries and rerun kernel, transport, UI, and syscall tests.

@@ -7,7 +7,6 @@ This document attempts to describe how Jujutsu is different from Git. See
 the `jj` command interoperates with Git repos. See
 [the Git command table](git-command-table.md) for a table of similar commands.
 
-
 ## Overview
 
 Here is a list of conceptual differences between Jujutsu and Git, along with
@@ -39,12 +38,21 @@ links to more details where applicable and available. There's a
   then you issue a later command to update the bookmark.
 * **Conflicts can be committed.** No commands fail because of merge conflicts.
   The conflicts are instead recorded in commits and you can resolve them later.
-  [Details](conflicts.md).
+  [Details](conflicts.md). This lets us rebase conflict and conflict
+  resolutions, and thereby addressing most `git rerere` use cases.
 * **Descendant commits are automatically rebased.** Whenever you rewrite a
   commit (e.g. by running `jj rebase`), all its descendants commits will
   automatically be rebased on top. Branches pointing to it will also get
   updated, and so will the working copy if it points to any of the rebased
   commits.
+* **No "evil merges".** In Git, a merge commit that contains changes that are
+  not in any parent are called [evil merges]. We believe the reason for this
+  opinionated term is that Git has historically not been very good at working
+  with such commits. For example, `git show` doesn't show them well (without
+  `--remerge-diff` from 2022), and `git rebase` drops the changes (without
+  `--rebase-merges` from 2018). Jujutsu defines the changes in a commit as
+  being relative to the auto-merged parents in all contexts, so you can safely
+  include change in merge commits.
 * **Bookmarks/branches are identified by their names (across remotes).** For
   example, if you pull from a remote that has a `main` branch, you'll get a
   bookmark by that name in your local repo. If you then move it and push back to
@@ -61,7 +69,6 @@ links to more details where applicable and available. There's a
   all commits. That removes the awkward state Git calls the "unborn branch"
   state (which is the state a newly initialized Git repo is in), and related
   command-line flags (e.g. `git rebase --root`, `git checkout --orphan`).
-
 
 ## The index
 
@@ -82,3 +89,5 @@ changes into the parent commit, which you might normally use
 `git add -p; git commit --amend` for, you can instead use `jj squash -i` to
 choose which changes to move into the parent commit, or `jj squash <file>` to
 move a specific file.
+
+[evil merges]: https://git-scm.com/docs/gitglossary#Documentation/gitglossary.txt-evilmerge

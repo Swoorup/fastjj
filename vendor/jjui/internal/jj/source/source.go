@@ -1,0 +1,151 @@
+package source
+
+import (
+	"bufio"
+	"fmt"
+	"strings"
+
+	"github.com/idursun/jjui/internal/jj"
+)
+
+type Kind int
+
+const (
+	KindFunction Kind = iota
+	KindAlias
+	KindHistory
+	KindBookmark
+	KindTag
+	KindRemote
+	KindFile
+	KindComment
+	KindRevision
+)
+
+// Item represents a completion/picker item from any source.
+type Item struct {
+	Name string
+	File jj.FileName
+	// Value is returned when a target picker selects the item. An empty value
+	// falls back to Name.
+	Value         string
+	Kind          Kind
+	SignatureHelp string
+	HasParameters bool
+}
+
+// Runner executes a jj command and returns its output.
+type Runner = func([]string) ([]byte, error)
+
+// Source provides items for completion or selection.
+type Source interface {
+	Fetch(runner Runner) ([]Item, error)
+}
+
+type FileSource struct {
+	Files []jj.FileName
+}
+
+func (s FileSource) Fetch(_ Runner) ([]Item, error) {
+	items := make([]Item, 0, len(s.Files))
+	for _, file := range s.Files {
+		if strings.TrimSpace(file.Path()) == "" {
+			continue
+		}
+		items = append(items, Item{Name: file.Path(), File: file, Kind: KindFile})
+	}
+	return items, nil
+}
+
+type StaticSource struct {
+	Items []Item
+}
+
+func (s StaticSource) Fetch(_ Runner) ([]Item, error) {
+	return s.Items, nil
+}
+
+// FetchAll collects items from multiple sources, skipping failures.
+func FetchAll(runner Runner, sources ...Source) []Item {
+	var all []Item
+	for _, s := range sources {
+		items, err := s.Fetch(runner)
+		if err != nil {
+			continue
+		}
+		all = append(all, items...)
+	}
+	return all
+}
+
+// BookmarkSource loads all bookmarks (local + remote).
+type BookmarkSource struct{}
+
+func (s BookmarkSource) Fetch(runner Runner) ([]Item, error) {
+	output, err := runner(jj.BookmarkListAll())
+	if err != nil {
+		return nil, err
+	}
+	bookmarks := jj.ParseBookmarkListOutput(string(output))
+	var items []Item
+	for _, b := range bookmarks {
+		if b.Name == "" {
+			continue
+		}
+		if b.Local != nil && b.Local.Present {
+			items = append(items, Item{Name: b.Name, Kind: KindBookmark})
+		}
+		for _, remote := range b.Remotes {
+			if !remote.Present {
+				continue
+			}
+			items = append(items, Item{Name: fmt.Sprintf("%s@%s", b.Name, remote.Remote), Kind: KindBookmark})
+		}
+	}
+	return items, nil
+}
+
+// TagSource loads all tags.
+type TagSource struct{}
+
+func (s TagSource) Fetch(runner Runner) ([]Item, error) {
+	output, err := runner(jj.TagList())
+	if err != nil {
+		return nil, err
+	}
+	names := ParseTagListOutput(string(output))
+	items := make([]Item, len(names))
+	for i, name := range names {
+		items[i] = Item{Name: name, Kind: KindTag}
+	}
+	return items, nil
+}
+
+// RemoteSource loads Git remote names.
+type RemoteSource struct{}
+
+func (s RemoteSource) Fetch(runner Runner) ([]Item, error) {
+	output, err := runner(jj.GitRemoteList())
+	if err != nil {
+		return nil, err
+	}
+	remotes := jj.ParseRemoteListOutput(string(output))
+	items := make([]Item, 0, len(remotes))
+	for _, remote := range remotes {
+		items = append(items, Item{Name: remote, Kind: KindRemote})
+	}
+	return items, nil
+}
+
+// ParseTagListOutput parses the output of `jj tag list` into tag names.
+func ParseTagListOutput(output string) []string {
+	var names []string
+	scanner := bufio.NewScanner(strings.NewReader(output))
+	for scanner.Scan() {
+		name := strings.TrimSpace(scanner.Text())
+		if name != "" {
+			names = append(names, name)
+		}
+	}
+	return names
+}

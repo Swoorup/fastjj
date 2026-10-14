@@ -27,8 +27,11 @@ use crate::template_parser;
 use crate::template_parser::FunctionCallNode;
 use crate::template_parser::TemplateDiagnostics;
 use crate::template_parser::TemplateParseResult;
+use crate::templater::BoxedSerializeProperty;
 use crate::templater::BoxedTemplateProperty;
+use crate::templater::ListTemplate;
 use crate::templater::Template;
+use crate::templater::TemplatePropertyExt as _;
 
 /// General-purpose template language for basic value types.
 ///
@@ -41,7 +44,10 @@ pub struct GenericTemplateLanguage<'a, C> {
     build_fn_table: GenericTemplateBuildFnTable<'a, C>,
 }
 
-impl<'a, C> GenericTemplateLanguage<'a, C> {
+impl<'a, C> GenericTemplateLanguage<'a, C>
+where
+    C: serde::Serialize + 'a,
+{
     /// Sets up environment with no keywords.
     ///
     /// New keyword functions can be registered by `add_keyword()`.
@@ -54,7 +60,7 @@ impl<'a, C> GenericTemplateLanguage<'a, C> {
         keywords: GenericTemplateBuildKeywordFnMap<'a, C>,
         settings: &UserSettings,
     ) -> Self {
-        GenericTemplateLanguage {
+        Self {
             // Clone settings to keep lifetime simple. It's cheap.
             settings: settings.clone(),
             build_fn_table: GenericTemplateBuildFnTable {
@@ -73,7 +79,7 @@ impl<'a, C> GenericTemplateLanguage<'a, C> {
     /// ```ignore
     /// language.add_keyword("name", |self_property| {
     ///     let out_property = self_property.map(|v| v.to_string());
-    ///     Ok(GenericTemplateLanguage::wrap_string(out_property))
+    ///     Ok(out_property.into_dyn_wrapped())
     /// });
     /// ```
     pub fn add_keyword<F>(&mut self, name: &'static str, build: F)
@@ -87,7 +93,10 @@ impl<'a, C> GenericTemplateLanguage<'a, C> {
     }
 }
 
-impl<'a, C> TemplateLanguage<'a> for GenericTemplateLanguage<'a, C> {
+impl<'a, C> TemplateLanguage<'a> for GenericTemplateLanguage<'a, C>
+where
+    C: serde::Serialize + 'a,
+{
     type Property = GenericTemplatePropertyKind<'a, C>;
 
     fn settings(&self) -> &UserSettings {
@@ -133,67 +142,99 @@ pub enum GenericTemplatePropertyKind<'a, C> {
     Self_(BoxedTemplateProperty<'a, C>),
 }
 
-impl<'a, C> GenericTemplatePropertyKind<'a, C> {
-    template_builder::impl_wrap_property_fns!('a, GenericTemplatePropertyKind, {
-        pub wrap_self(C) => Self_,
-    });
+template_builder::impl_core_property_wrappers!(<'a, C> GenericTemplatePropertyKind<'a, C> => Core);
+
+/// Implements conversion trait for the self property type.
+///
+/// Since we cannot guarantee that the generic type `C` does not conflict with
+/// the core template types, the conversion trait has to be implemented for each
+/// concrete type.
+macro_rules! impl_self_property_wrapper {
+    ($context:path) => {
+        $crate::template_builder::impl_property_wrappers!(
+            $crate::generic_templater::GenericTemplatePropertyKind<'static, $context> {
+                Self_($context),
+            }
+        );
+    };
+    (<$a:lifetime> $context:path) => {
+        $crate::template_builder::impl_property_wrappers!(
+            <$a> $crate::generic_templater::GenericTemplatePropertyKind<$a, $context> {
+                Self_($context),
+            }
+        );
+    };
 }
 
-impl<'a, C> CoreTemplatePropertyVar<'a> for GenericTemplatePropertyKind<'a, C> {
-    template_builder::impl_core_wrap_property_fns!('a, GenericTemplatePropertyKind::Core);
+pub(crate) use impl_self_property_wrapper;
+
+impl<'a, C> CoreTemplatePropertyVar<'a> for GenericTemplatePropertyKind<'a, C>
+where
+    C: serde::Serialize + 'a,
+{
+    fn wrap_template(template: Box<dyn Template + 'a>) -> Self {
+        Self::Core(CoreTemplatePropertyKind::wrap_template(template))
+    }
+
+    fn wrap_list_template(template: Box<dyn ListTemplate + 'a>) -> Self {
+        Self::Core(CoreTemplatePropertyKind::wrap_list_template(template))
+    }
 
     fn type_name(&self) -> &'static str {
         match self {
-            GenericTemplatePropertyKind::Core(property) => property.type_name(),
-            GenericTemplatePropertyKind::Self_(_) => "Self",
+            Self::Core(property) => property.type_name(),
+            Self::Self_(_) => "Self",
         }
     }
 
     fn try_into_boolean(self) -> Option<BoxedTemplateProperty<'a, bool>> {
         match self {
-            GenericTemplatePropertyKind::Core(property) => property.try_into_boolean(),
-            GenericTemplatePropertyKind::Self_(_) => None,
+            Self::Core(property) => property.try_into_boolean(),
+            Self::Self_(_) => None,
         }
     }
 
     fn try_into_integer(self) -> Option<BoxedTemplateProperty<'a, i64>> {
         match self {
-            GenericTemplatePropertyKind::Core(property) => property.try_into_integer(),
-            GenericTemplatePropertyKind::Self_(_) => None,
+            Self::Core(property) => property.try_into_integer(),
+            Self::Self_(_) => None,
         }
     }
 
-    fn try_into_plain_text(self) -> Option<BoxedTemplateProperty<'a, String>> {
+    fn try_into_stringify(self) -> Option<BoxedTemplateProperty<'a, String>> {
         match self {
-            GenericTemplatePropertyKind::Core(property) => property.try_into_plain_text(),
-            GenericTemplatePropertyKind::Self_(_) => None,
+            Self::Core(property) => property.try_into_stringify(),
+            Self::Self_(_) => None,
+        }
+    }
+
+    fn try_into_serialize(self) -> Option<BoxedSerializeProperty<'a>> {
+        match self {
+            Self::Core(property) => property.try_into_serialize(),
+            Self::Self_(property) => Some(property.into_serialize()),
         }
     }
 
     fn try_into_template(self) -> Option<Box<dyn Template + 'a>> {
         match self {
-            GenericTemplatePropertyKind::Core(property) => property.try_into_template(),
-            GenericTemplatePropertyKind::Self_(_) => None,
+            Self::Core(property) => property.try_into_template(),
+            Self::Self_(_) => None,
         }
     }
 
     fn try_into_eq(self, other: Self) -> Option<BoxedTemplateProperty<'a, bool>> {
         match (self, other) {
-            (GenericTemplatePropertyKind::Core(lhs), GenericTemplatePropertyKind::Core(rhs)) => {
-                lhs.try_into_eq(rhs)
-            }
-            (GenericTemplatePropertyKind::Core(_), _) => None,
-            (GenericTemplatePropertyKind::Self_(_), _) => None,
+            (Self::Core(lhs), Self::Core(rhs)) => lhs.try_into_eq(rhs),
+            (Self::Core(_), _) => None,
+            (Self::Self_(_), _) => None,
         }
     }
 
     fn try_into_cmp(self, other: Self) -> Option<BoxedTemplateProperty<'a, Ordering>> {
         match (self, other) {
-            (GenericTemplatePropertyKind::Core(lhs), GenericTemplatePropertyKind::Core(rhs)) => {
-                lhs.try_into_cmp(rhs)
-            }
-            (GenericTemplatePropertyKind::Core(_), _) => None,
-            (GenericTemplatePropertyKind::Self_(_), _) => None,
+            (Self::Core(lhs), Self::Core(rhs)) => lhs.try_into_cmp(rhs),
+            (Self::Core(_), _) => None,
+            (Self::Self_(_), _) => None,
         }
     }
 }
@@ -214,6 +255,10 @@ pub type GenericTemplateBuildKeywordFnMap<'a, C> =
 
 /// Symbol table of methods available in the general-purpose template.
 struct GenericTemplateBuildFnTable<'a, C> {
-    core: CoreTemplateBuildFnTable<'a, GenericTemplateLanguage<'a, C>>,
+    core: CoreTemplateBuildFnTable<
+        'a,
+        GenericTemplateLanguage<'a, C>,
+        GenericTemplatePropertyKind<'a, C>,
+    >,
     keywords: GenericTemplateBuildKeywordFnMap<'a, C>,
 }

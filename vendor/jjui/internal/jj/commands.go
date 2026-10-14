@@ -1,0 +1,511 @@
+package jj
+
+import (
+	"fmt"
+	"strconv"
+	"strings"
+
+	"github.com/idursun/jjui/internal/config"
+)
+
+const (
+	ChangeIdPlaceholder     = "$change_id"
+	CommitIdPlaceholder     = "$commit_id"
+	FilePlaceholder         = "$file"
+	OperationIdPlaceholder  = "$operation_id"
+	RevsetPlaceholder       = "$revset"
+	PreviewWidthPlaceholder = "$preview_width"
+
+	// CheckedFilesPlaceholder user checked file names, separated by `\t` tab.
+	// tab is a lot less common than spaces on filenames
+	// and is also part of shell's IFS separator.
+	// this allows programs like `ls -l ${checked_files[@]}`
+	CheckedFilesPlaceholder = "$checked_files"
+
+	// CheckedCommitIdsPlaceholder user checked commit ids, separated by `|`.
+	// the reason is user can use checked commits as revsets
+	// given to jj commands.
+	CheckedCommitIdsPlaceholder = "$checked_commit_ids"
+	JJUIPrefix                  = "_PREFIX:"
+)
+
+type (
+	CommandArgs      []string
+	CommandWithStdin struct {
+		Args  CommandArgs
+		Input string
+	}
+)
+
+func ConfigListAll() CommandArgs {
+	return []string{"config", "list", "--color", "never", "--include-defaults", "--ignore-working-copy"}
+}
+
+func Log(revset string, limit int, jjTemplate string) CommandArgs {
+	args := []string{"log", "--color", "always", "--quiet"}
+	if revset != "" {
+		args = append(args, "-r", revset)
+	}
+	if limit > 0 {
+		args = append(args, "--limit", strconv.Itoa(limit))
+	}
+	template := config.Current.Revisions.Template
+	// If jjui's template is empty, fall back to jj's templates.log
+	if template == "" {
+		template = jjTemplate
+	}
+	prefix := fmt.Sprintf(
+		"stringify('%s' ++ separate('%s', change_id.shortest() ++ if(divergent, \"/\" ++ change_offset), commit_id.shortest()))",
+		JJUIPrefix, JJUIPrefix)
+	template = fmt.Sprintf("%s ++ ' ' ++ %s", prefix, template)
+	args = append(args, "-T", template)
+	return args
+}
+
+func New(revisions SelectedRevisions) CommandArgs {
+	args := []string{"new"}
+	args = append(args, revisions.AsArgs()...)
+	return args
+}
+
+func NewInsert(insertAfter SelectedRevisions, insertBefore SelectedRevisions) CommandArgs {
+	args := []string{"new"}
+	args = append(args, insertAfter.AsPrefixedArgs("--insert-after")...)
+	args = append(args, insertBefore.AsPrefixedArgs("--insert-before")...)
+	return args
+}
+
+func CommitWorkingCopy() CommandArgs {
+	return []string{"commit"}
+}
+
+func Edit(changeId string, ignoreImmutable bool) CommandArgs {
+	args := []string{"edit", "-r", changeId}
+	if ignoreImmutable {
+		args = append(args, "--ignore-immutable")
+	}
+	return args
+}
+
+func DiffEdit(changeId string) CommandArgs {
+	return []string{"diffedit", "-r", changeId}
+}
+
+func Split(revision string, files []FileName, parallel bool, interactive bool) CommandArgs {
+	args := []string{"split", "-r", revision}
+	if parallel {
+		args = append(args, "--parallel")
+	}
+	if interactive {
+		args = append(args, "--interactive")
+	}
+	var escapedFiles []string
+	for _, file := range files {
+		escapedFiles = append(escapedFiles, file.Escaped())
+	}
+	args = append(args, escapedFiles...)
+	return args
+}
+
+func Describe(revisions SelectedRevisions) CommandArgs {
+	args := []string{"describe", "--editor"}
+	args = append(args, revisions.AsArgs()...)
+	return args
+}
+
+func SetDescription(revision string, description string, ignoreImmutable bool) CommandWithStdin {
+	args := []string{"describe", "-r", revision, "--stdin"}
+	if ignoreImmutable {
+		args = append(args, "--ignore-immutable")
+	}
+	return CommandWithStdin{
+		Args:  args,
+		Input: description,
+	}
+}
+
+func GetDescription(revision string) CommandArgs {
+	return []string{"log", "-r", revision, "--template", "description", "--no-graph", "--ignore-working-copy", "--color", "never", "--quiet"}
+}
+
+func Abandon(revision SelectedRevisions, ignoreImmutable bool) CommandArgs {
+	args := []string{"abandon", "--retain-bookmarks"}
+	args = append(args, revision.AsArgs()...)
+	if ignoreImmutable {
+		args = append(args, "--ignore-immutable")
+	}
+	return args
+}
+
+func Diff(revision string, fileName FileName, extraArgs ...string) CommandArgs {
+	args := []string{"diff", "-r", revision, "--color", "always", "--ignore-working-copy"}
+	if !fileName.IsEmpty() {
+		args = append(args, fileName.Escaped())
+	}
+	if extraArgs != nil {
+		args = append(args, extraArgs...)
+	}
+	return args
+}
+
+func DiffRange(from string, to string) CommandArgs {
+	args := []string{"diff", "--from", from}
+	if to != "" {
+		args = append(args, "--to", to)
+	}
+	return append(args, "--color", "always", "--ignore-working-copy")
+}
+
+func AnnotationDiff(revision string) CommandArgs {
+	return []string{"diff", "-r", revision, "--git", "--color", "never", "--ignore-working-copy"}
+}
+
+func FileShow(revision string, fileName string) CommandArgs {
+	return []string{
+		"file", "show", "-r", revision,
+		"--color", "never", "--no-pager", "--quiet", "--ignore-working-copy",
+		"--template", "",
+		NewFileName(fileName).Escaped(),
+	}
+}
+
+func Restore(revision string, files []FileName, interactive bool) CommandArgs {
+	args := []string{"restore", "-c", revision}
+	if interactive {
+		args = append(args, "--interactive")
+	}
+	var escapedFiles []string
+	for _, file := range files {
+		escapedFiles = append(escapedFiles, file.Escaped())
+	}
+	args = append(args, escapedFiles...)
+	return args
+}
+
+func RestoreEvolog(from string, into string) CommandArgs {
+	args := []string{"restore", "--from", from, "--into", into, "--restore-descendants"}
+	return args
+}
+
+func Undo() CommandArgs {
+	return []string{"undo"}
+}
+
+func Redo() CommandArgs {
+	return []string{"redo"}
+}
+
+func Snapshot() CommandArgs {
+	return []string{"debug", "snapshot"}
+}
+
+func Status(revision string) CommandArgs {
+	template := `separate(";", diff.files().map(|x| x.target().conflict())) ++ " $\n"`
+	return []string{"log", "-r", revision, "--summary", "--no-graph", "--color", "never", "--quiet", "--template", template, "--ignore-working-copy"}
+}
+
+func BookmarkSet(revision string, name string) CommandArgs {
+	return []string{"bookmark", "set", "-r", revision, name}
+}
+
+func exactStringPattern(value string) string {
+	return "exact:" + strconv.Quote(value)
+}
+
+func BookmarkMove(revision string, bookmark string, extraFlags ...string) CommandArgs {
+	args := []string{"bookmark", "move", exactStringPattern(bookmark), "--to", revision}
+	if extraFlags != nil {
+		args = append(args, extraFlags...)
+	}
+	return args
+}
+
+func BookmarkDelete(name string) CommandArgs {
+	return []string{"bookmark", "delete", exactStringPattern(name)}
+}
+
+func BookmarkRename(oldName string, newName string) CommandArgs {
+	return []string{"bookmark", "rename", oldName, newName}
+}
+
+func BookmarkForget(name string) CommandArgs {
+	return []string{"bookmark", "forget", exactStringPattern(name)}
+}
+
+func BookmarkTrack(name string, remote string) CommandArgs {
+	args := []string{"bookmark", "track", exactStringPattern(name)}
+	if remote != "" {
+		args = append(args, "--remote", exactStringPattern(remote))
+	}
+	return args
+}
+
+func BookmarkUntrack(name string, remote string) CommandArgs {
+	args := []string{"bookmark", "untrack", exactStringPattern(name)}
+	if remote != "" {
+		args = append(args, "--remote", exactStringPattern(remote))
+	}
+	return args
+}
+
+func Squash(from SelectedRevisions, destination string, files []FileName, keepEmptied bool, useDestinationMessage bool, interactive bool, ignoreImmutable bool) CommandArgs {
+	args := []string{"squash"}
+	args = append(args, from.AsPrefixedArgs("--from")...)
+	args = append(args, "--into", destination)
+	if keepEmptied {
+		args = append(args, "--keep-emptied")
+	}
+	if useDestinationMessage {
+		args = append(args, "--use-destination-message")
+	}
+	if interactive {
+		args = append(args, "--interactive")
+	}
+	if ignoreImmutable {
+		args = append(args, "--ignore-immutable")
+	}
+	if len(files) > 0 {
+		var escapedFiles []string
+		for _, file := range files {
+			escapedFiles = append(escapedFiles, file.Escaped())
+		}
+		args = append(args, escapedFiles...)
+	}
+	return args
+}
+
+func BookmarkList(revset string) CommandArgs {
+	return []string{"bookmark", "list", "-a", "-r", revset, "--template", allBookmarkTemplate, "--color", "never", "--ignore-working-copy"}
+}
+
+func BookmarkListMovable(revision string) CommandArgs {
+	revsetBefore := fmt.Sprintf("::%s", revision)
+	revsetAfter := fmt.Sprintf("%s::", revision)
+	revset := fmt.Sprintf("%s | %s", revsetBefore, revsetAfter)
+	template := fmt.Sprintf(moveBookmarkTemplate, revsetAfter)
+	return []string{"bookmark", "list", "-r", revset, "--template", template, "--color", "never", "--ignore-working-copy"}
+}
+
+func BookmarkListAll() CommandArgs {
+	return []string{"bookmark", "list", "-a", "--template", allBookmarkTemplate, "--color", "never", "--ignore-working-copy"}
+}
+
+func TagList() CommandArgs {
+	return []string{"tag", "list", "--template", "name ++ '\n'", "--color", "never", "--ignore-working-copy"}
+}
+
+func GitFetch(flags ...string) CommandArgs {
+	args := []string{"git", "fetch"}
+	if flags != nil {
+		args = append(args, flags...)
+	}
+	return args
+}
+
+func GitPush(flags ...string) CommandArgs {
+	args := []string{"git", "push"}
+	if flags != nil {
+		args = append(args, flags...)
+	}
+	return args
+}
+
+func GitRemoteList() CommandArgs {
+	return []string{"git", "remote", "list"}
+}
+
+func Rebase(from SelectedRevisions, sourcePrefix string, to string, target string, skipEmptied bool, ignoreImmutable bool) CommandArgs {
+	args := []string{"rebase"}
+	args = append(args, from.AsPrefixedArgs(sourcePrefix)...)
+	args = append(args, target, to)
+	if ignoreImmutable {
+		args = append(args, "--ignore-immutable")
+	}
+	if skipEmptied {
+		args = append(args, "--skip-emptied")
+	}
+	return args
+}
+
+func RebaseInsert(from SelectedRevisions, sourcePrefix string, insertAfter string, insertBefore string, skipEmptied bool, ignoreImmutable bool) CommandArgs {
+	args := []string{"rebase"}
+	args = append(args, from.AsPrefixedArgs(sourcePrefix)...)
+	args = append(args, "--insert-before", insertBefore)
+	args = append(args, "--insert-after", insertAfter)
+	if ignoreImmutable {
+		args = append(args, "--ignore-immutable")
+	}
+	if skipEmptied {
+		args = append(args, "--skip-emptied")
+	}
+	return args
+}
+
+func SetParents(to string, parentsToAdd []string, parentsToRemove []string) CommandArgs {
+	var b strings.Builder
+	b.WriteString("parents(")
+	b.WriteString(to)
+	b.WriteString(")")
+	for _, remove := range parentsToRemove {
+		b.WriteString(" ~ ")
+		b.WriteString(remove)
+	}
+	args := []string{"rebase", "-s", to, "-d", b.String()}
+	for _, add := range parentsToAdd {
+		args = append(args, "-d", add)
+	}
+	return args
+}
+
+func Revert(from SelectedRevisions, to string, source string, target string) CommandArgs {
+	args := []string{"revert"}
+	args = append(args, from.AsPrefixedArgs(source)...)
+	args = append(args, target, to)
+	return args
+}
+
+func RevertInsert(from SelectedRevisions, insertAfter string, insertBefore string) CommandArgs {
+	args := []string{"revert"}
+	args = append(args, from.AsArgs()...)
+	args = append(args, "--insert-before", insertBefore)
+	args = append(args, "--insert-after", insertAfter)
+	return args
+}
+
+func Duplicate(from SelectedRevisions, to string, target string) CommandArgs {
+	args := []string{"duplicate"}
+	args = append(args, from.AsPrefixedArgs("-r")...)
+	args = append(args, target, to)
+	return args
+}
+
+func DuplicateInsert(from SelectedRevisions, insertAfter string, insertBefore string) CommandArgs {
+	args := []string{"duplicate"}
+	args = append(args, from.AsPrefixedArgs("-r")...)
+	args = append(args, "--insert-before", insertBefore)
+	args = append(args, "--insert-after", insertAfter)
+	return args
+}
+
+func Evolog(revision string) CommandArgs {
+	prefix := fmt.Sprintf(
+		"stringify('%s' ++ separate('%s', commit.change_id().shortest(), commit.commit_id().shortest()))",
+		JJUIPrefix, JJUIPrefix)
+	template := "builtin_evolog_compact"
+	template = fmt.Sprintf("%s ++ ' ' ++ %s", prefix, template)
+	return []string{"evolog", "-r", revision, "--color", "always", "--quiet", "--ignore-working-copy", "--template", template}
+}
+
+func Args(args ...string) CommandArgs {
+	return args
+}
+
+func TemplatedArgs(templatedArgs []string, replacements map[string]string) CommandArgs {
+	var args []string
+	if fileReplacement, exists := replacements[FilePlaceholder]; exists {
+		// Ensure that the file replacement is quoted
+		replacements[FilePlaceholder] = NewFileName(fileReplacement).Escaped()
+	}
+	for _, arg := range templatedArgs {
+		for k, v := range replacements {
+			arg = strings.ReplaceAll(arg, k, v)
+		}
+		args = append(args, arg)
+	}
+	return args
+}
+
+func Absorb(changeId string, into []string, files ...FileName) CommandArgs {
+	args := []string{"absorb", "--from", changeId, "--color", "never"}
+	for _, target := range into {
+		args = append(args, "--into", target)
+	}
+	var escapedFiles []string
+	for _, file := range files {
+		escapedFiles = append(escapedFiles, file.Escaped())
+	}
+	args = append(args, escapedFiles...)
+	return args
+}
+
+func AbsorbDefaultTargets(source string) CommandArgs {
+	revset := fmt.Sprintf("mutable() & ::%s", source)
+	return GetIdsFromRevset(revset)
+}
+
+func OpLogId(snapshot bool) CommandArgs {
+	args := []string{"op", "log", "--color", "never", "--quiet", "--no-graph", "--limit", "1", "--template", "id"}
+	if !snapshot {
+		args = append(args, "--ignore-working-copy")
+	}
+	return args
+}
+
+func OpLog(limit int) CommandArgs {
+	args := []string{"op", "log", "--color", "always", "--quiet", "--ignore-working-copy"}
+	if limit > 0 {
+		args = append(args, "--limit", strconv.Itoa(limit))
+	}
+	return args
+}
+
+func OpShow(operationId string) CommandArgs {
+	return []string{"op", "show", operationId, "--color", "always", "--ignore-working-copy"}
+}
+
+func OpRestore(operationId string) CommandArgs {
+	return []string{"op", "restore", operationId}
+}
+
+func OpRevert(operationID string) CommandArgs {
+	return []string{"op", "revert", operationID}
+}
+
+func GetParent(revisions SelectedRevisions) CommandArgs {
+	args := []string{"log", "-r"}
+	joined := strings.Join(revisions.GetIds(), "|")
+	args = append(args, fmt.Sprintf("heads(::fork_point(%s) & ~present(%s))", joined, joined))
+	args = append(args, "-n", "1", "--color", "never", "--no-graph", "--quiet", "--ignore-working-copy", "--template", "commit_id.shortest()")
+	return args
+}
+
+func GetParents(revision string) CommandArgs {
+	args := []string{"log", "-r", revision}
+	args = append(args, "--color", "never", "--no-graph", "--quiet", "--ignore-working-copy", "--template", "parents.map(|x| x.commit_id().shortest())")
+	return args
+}
+
+func GetFirstChild(revision *Commit) CommandArgs {
+	args := []string{"log", "-r"}
+	args = append(args, fmt.Sprintf("%s+", revision.CommitId))
+	args = append(args, "-n", "1", "--color", "never", "--no-graph", "--quiet", "--ignore-working-copy", "--template", "commit_id.shortest()")
+	return args
+}
+
+func FilesInRevision(revision *Commit) CommandArgs {
+	args := []string{
+		"file", "list", "-r", revision.CommitId,
+		"--color", "never", "--no-pager", "--quiet", "--ignore-working-copy",
+		"--template", "self.path() ++ \"\n\"",
+	}
+	return args
+}
+
+func GetIdsFromRevset(revset string) CommandArgs {
+	const template = `change_id.shortest() ++ if(divergent, "/" ++ change_offset) ++ "\n"`
+	return []string{"log", "-r", revset, "--color", "never", "--no-graph", "--quiet", "--ignore-working-copy", "--template", template}
+}
+
+func GetRevisionSummariesFromRevset(revset string) CommandArgs {
+	const template = `change_id.shortest() ++ if(divergent, "/" ++ change_offset) ++ "\t" ++ description.first_line() ++ "\n"`
+	return []string{"log", "-r", revset, "--color", "never", "--no-graph", "--quiet", "--ignore-working-copy", "--template", template}
+}
+
+func ResolveRevisionID(revision string) CommandArgs {
+	const template = `change_id.shortest() ++ ";" ++ commit_id.shortest() ++ "\n"`
+	return []string{"log", "-r", revision, "-n", "1", "--color", "never", "--no-graph", "--quiet", "--ignore-working-copy", "--template", template}
+}
+
+func RevsetValidate(revset string) CommandArgs {
+	return []string{"log", "-r", revset, "-n", "1", "--ignore-working-copy"}
+}

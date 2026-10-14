@@ -12,28 +12,36 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::collections::HashSet;
 use std::io::BufRead as _;
+use std::path::Path;
 
-use clap::builder::StyledStr;
 use clap::FromArgMatches as _;
+use clap::builder::StyledStr;
 use clap_complete::CompletionCandidate;
+use indoc::indoc;
 use itertools::Itertools as _;
 use jj_lib::config::ConfigNamePathBuf;
+use jj_lib::file_util::normalize_path;
+use jj_lib::file_util::slash_path;
 use jj_lib::settings::UserSettings;
 use jj_lib::workspace::DefaultWorkspaceLoaderFactory;
 use jj_lib::workspace::WorkspaceLoaderFactory as _;
 
+use crate::cli_util::GlobalArgs;
 use crate::cli_util::expand_args;
 use crate::cli_util::find_workspace_dir;
 use crate::cli_util::load_template_aliases;
-use crate::cli_util::GlobalArgs;
-use crate::command_error::user_error;
 use crate::command_error::CommandError;
-use crate::config::config_from_environment;
-use crate::config::default_config_layers;
+use crate::command_error::user_error;
+use crate::config::CONFIG_SCHEMA;
 use crate::config::ConfigArgKind;
 use crate::config::ConfigEnv;
-use crate::config::CONFIG_SCHEMA;
+use crate::config::config_from_environment;
+use crate::config::default_config_layers;
+use crate::merge_tools::ExternalMergeTool;
+use crate::merge_tools::configured_merge_tools;
+use crate::merge_tools::get_external_tool_config;
 use crate::revset_util::load_revset_aliases;
 use crate::ui::Ui;
 
@@ -45,6 +53,16 @@ if(normal_target,
         "(no description set)",
     ),
     "(conflicted bookmark)",
+)
+'''"#;
+const TAG_HELP_TEMPLATE: &str = r#"template-aliases.'tag_help()'='''
+" " ++
+if(normal_target,
+    if(normal_target.description(),
+        normal_target.description().first_line(),
+        "(no description set)",
+    ),
+    "(conflicted tag)",
 )
 '''"#;
 
@@ -95,14 +113,31 @@ pub fn tracked_bookmarks() -> Vec<CompletionCandidate> {
         Ok(String::from_utf8_lossy(&output.stdout)
             .lines()
             .map(split_help_text)
-            .map(|(name, help)| CompletionCandidate::new(name).help(help))
+            .filter_map(|(symbol, help)| Some((symbol.split_once('@')?, help)))
+            // There may be multiple remote bookmarks to untrack. Just pick the
+            // first one for help text.
+            .dedup_by(|((name1, _), _), ((name2, _), _)| name1 == name2)
+            .map(|((name, _remote), help)| CompletionCandidate::new(name).help(help))
             .collect())
     })
 }
 
 pub fn untracked_bookmarks() -> Vec<CompletionCandidate> {
-    with_jj(|jj, settings| {
-        let output = jj
+    with_jj(|jj, _settings| {
+        let remotes = jj
+            .build()
+            .arg("git")
+            .arg("remote")
+            .arg("list")
+            .output()
+            .map_err(user_error)?;
+        let remotes = String::from_utf8_lossy(&remotes.stdout);
+        let remotes = remotes
+            .lines()
+            .filter_map(|l| l.split_whitespace().next())
+            .collect_vec();
+
+        let bookmark_table = jj
             .build()
             .arg("bookmark")
             .arg("list")
@@ -111,35 +146,55 @@ pub fn untracked_bookmarks() -> Vec<CompletionCandidate> {
             .arg(BOOKMARK_HELP_TEMPLATE)
             .arg("--template")
             .arg(
-                r#"if(remote && !tracked && remote != "git",
-                    name ++ '@' ++ remote ++ bookmark_help() ++ "\n"
+                r#"
+                if(remote != "git",
+                    if(!remote, name) ++ "\t" ++
+                    if(remote, name ++ "@" ++ remote) ++ "\t" ++
+                    if(tracked, "tracked") ++ "\t" ++
+                    bookmark_help() ++ "\n"
                 )"#,
             )
             .output()
             .map_err(user_error)?;
+        let bookmark_table = String::from_utf8_lossy(&bookmark_table.stdout);
 
-        let prefix = settings.get_string("git.push-bookmark-prefix").ok();
+        let mut possible_bookmarks_to_track = Vec::new();
+        let mut already_tracked_bookmarks = HashSet::new();
 
-        Ok(String::from_utf8_lossy(&output.stdout)
-            .lines()
-            .map(|line| {
-                let (name, help) = split_help_text(line);
+        for line in bookmark_table.lines() {
+            let [local, remote, tracked, help] =
+                line.split('\t').collect_array().unwrap_or_default();
 
-                let display_order = match prefix.as_ref() {
-                    // own bookmarks are more interesting
-                    Some(prefix) if name.starts_with(prefix) => 0,
-                    _ => 1,
-                };
-                CompletionCandidate::new(name)
-                    .help(help)
-                    .display_order(Some(display_order))
+            if !local.is_empty() {
+                possible_bookmarks_to_track.extend(
+                    remotes
+                        .iter()
+                        .map(|remote| (format!("{local}@{remote}"), help)),
+                );
+            } else if tracked.is_empty() {
+                possible_bookmarks_to_track.push((remote.to_owned(), help));
+            } else {
+                already_tracked_bookmarks.insert(remote);
+            }
+        }
+        possible_bookmarks_to_track
+            .retain(|(bookmark, _help)| !already_tracked_bookmarks.contains(&bookmark.as_str()));
+
+        Ok(possible_bookmarks_to_track
+            .iter()
+            .filter_map(|(symbol, help)| Some((symbol.split_once('@')?, help)))
+            // There may be multiple remote bookmarks to track. Just pick the
+            // first one for help text.
+            .dedup_by(|((name1, _), _), ((name2, _), _)| name1 == name2)
+            .map(|((name, _remote), help)| {
+                CompletionCandidate::new(name).help(Some(help.to_string().into()))
             })
             .collect())
     })
 }
 
 pub fn bookmarks() -> Vec<CompletionCandidate> {
-    with_jj(|jj, settings| {
+    with_jj(|jj, _settings| {
         let output = jj
             .build()
             .arg("bookmark")
@@ -156,8 +211,6 @@ pub fn bookmarks() -> Vec<CompletionCandidate> {
             .map_err(user_error)?;
         let stdout = String::from_utf8_lossy(&output.stdout);
 
-        let prefix = settings.get_string("git.push-bookmark-prefix").ok();
-
         Ok((&stdout
             .lines()
             .map(split_help_text)
@@ -165,20 +218,36 @@ pub fn bookmarks() -> Vec<CompletionCandidate> {
             .into_iter()
             .map(|(bookmark, mut refs)| {
                 let help = refs.find_map(|(_, help)| help);
-
                 let local = help.is_some();
-                let mine = prefix.as_ref().is_some_and(|p| bookmark.starts_with(p));
-
-                let display_order = match (local, mine) {
-                    (true, true) => 0,
-                    (true, false) => 1,
-                    (false, true) => 2,
-                    (false, false) => 3,
+                let display_order = match local {
+                    true => 0,
+                    false => 1,
                 };
                 CompletionCandidate::new(bookmark)
                     .help(help)
                     .display_order(Some(display_order))
             })
+            .collect())
+    })
+}
+
+pub fn local_tags() -> Vec<CompletionCandidate> {
+    with_jj(|jj, _| {
+        let output = jj
+            .build()
+            .arg("tag")
+            .arg("list")
+            .arg("--config")
+            .arg(TAG_HELP_TEMPLATE)
+            .arg("--template")
+            .arg(r#"if(!remote, name ++ tag_help()) ++ "\n""#)
+            .output()
+            .map_err(user_error)?;
+
+        Ok(String::from_utf8_lossy(&output.stdout)
+            .lines()
+            .map(split_help_text)
+            .map(|(name, help)| CompletionCandidate::new(name).help(help))
             .collect())
     })
 }
@@ -233,19 +302,15 @@ pub fn aliases() -> Vec<CompletionCandidate> {
 fn revisions(match_prefix: &str, revset_filter: Option<&str>) -> Vec<CompletionCandidate> {
     with_jj(|jj, settings| {
         // display order
-        const LOCAL_BOOKMARK_MINE: usize = 0;
-        const LOCAL_BOOKMARK: usize = 1;
-        const TAG: usize = 2;
-        const CHANGE_ID: usize = 3;
-        const REMOTE_BOOKMARK_MINE: usize = 4;
-        const REMOTE_BOOKMARK: usize = 5;
-        const REVSET_ALIAS: usize = 6;
+        const LOCAL_BOOKMARK: usize = 0;
+        const TAG: usize = 1;
+        const CHANGE_ID: usize = 2;
+        const REMOTE_BOOKMARK: usize = 3;
+        const REVSET_ALIAS: usize = 4;
 
         let mut candidates = Vec::new();
 
         // bookmarks
-
-        let prefix = settings.get_string("git.push-bookmark-prefix").ok();
 
         let mut cmd = jj.build();
         cmd.arg("bookmark")
@@ -270,13 +335,9 @@ fn revisions(match_prefix: &str, revset_filter: Option<&str>) -> Vec<CompletionC
                 .filter(|(bookmark, _)| bookmark.starts_with(match_prefix))
                 .map(|(bookmark, help)| {
                     let local = !bookmark.contains('@');
-                    let mine = prefix.as_ref().is_some_and(|p| bookmark.starts_with(p));
-
-                    let display_order = match (local, mine) {
-                        (true, true) => LOCAL_BOOKMARK_MINE,
-                        (true, false) => LOCAL_BOOKMARK,
-                        (false, true) => REMOTE_BOOKMARK_MINE,
-                        (false, false) => REMOTE_BOOKMARK,
+                    let display_order = match local {
+                        true => LOCAL_BOOKMARK,
+                        false => REMOTE_BOOKMARK,
                     };
                     CompletionCandidate::new(bookmark)
                         .help(help)
@@ -299,7 +360,7 @@ fn revisions(match_prefix: &str, revset_filter: Option<&str>) -> Vec<CompletionC
                 .arg(BOOKMARK_HELP_TEMPLATE)
                 .arg("--template")
                 .arg(r#"name ++ bookmark_help() ++ "\n""#)
-                .arg(format!("glob:{}*", glob::Pattern::escape(match_prefix)))
+                .arg(format!("glob:{}*", globset::escape(match_prefix)))
                 .output()
                 .map_err(user_error)?;
             let stdout = String::from_utf8_lossy(&output.stdout);
@@ -329,7 +390,16 @@ fn revisions(match_prefix: &str, revset_filter: Option<&str>) -> Vec<CompletionC
             .arg("--revisions")
             .arg(revisions)
             .arg("--template")
-            .arg(r#"change_id.shortest() ++ " " ++ if(description, description.first_line(), "(no description set)") ++ "\n""#)
+            .arg(
+                r#"
+                join(" ",
+                    separate("/",
+                        change_id.shortest(),
+                        if(hidden || divergent, change_offset),
+                    ),
+                    if(description, description.first_line(), "(no description set)"),
+                ) ++ "\n""#,
+            )
             .output()
             .map_err(user_error)?;
         let stdout = String::from_utf8_lossy(&output.stdout);
@@ -394,6 +464,10 @@ pub fn revset_expression_mutable(current: &std::ffi::OsStr) -> Vec<CompletionCan
     revset_expression(current, Some("mutable()"))
 }
 
+pub fn revset_expression_mutable_conflicts(current: &std::ffi::OsStr) -> Vec<CompletionCandidate> {
+    revset_expression(current, Some("mutable() & conflicts()"))
+}
+
 /// Identifies if an incomplete expression ends with a name, or may be continued
 /// with a name.
 ///
@@ -454,23 +528,94 @@ pub fn operations() -> Vec<CompletionCandidate> {
 }
 
 pub fn workspaces() -> Vec<CompletionCandidate> {
+    let template = indoc! {r#"
+        name ++ "\t" ++ if(
+            target.description(),
+            target.description().first_line(),
+            "(no description set)"
+        ) ++ "\n"
+    "#};
     with_jj(|jj, _| {
         let output = jj
             .build()
-            .arg("--config")
-            .arg(r#"templates.commit_summary='if(description, description.first_line(), "(no description set)")'"#)
             .arg("workspace")
             .arg("list")
+            .arg("--template")
+            .arg(template)
             .output()
             .map_err(user_error)?;
         let stdout = String::from_utf8_lossy(&output.stdout);
 
         Ok(stdout
             .lines()
-            .map(|line| {
-                let (name, desc) = line.split_once(": ").unwrap_or((line, ""));
-                CompletionCandidate::new(name).help(Some(desc.to_string().into()))
+            .filter_map(|line| {
+                let res = line.split_once("\t").map(|(name, desc)| {
+                    CompletionCandidate::new(name).help(Some(desc.to_string().into()))
+                });
+                if res.is_none() {
+                    eprintln!("Error parsing line {line}");
+                }
+                res
             })
+            .collect())
+    })
+}
+
+fn merge_tools_filtered_by(
+    settings: &UserSettings,
+    condition: impl Fn(ExternalMergeTool) -> bool,
+) -> impl Iterator<Item = &str> {
+    configured_merge_tools(settings).filter(move |name| {
+        let Ok(Some(tool)) = get_external_tool_config(settings, name) else {
+            return false;
+        };
+        condition(tool)
+    })
+}
+
+pub fn merge_editors() -> Vec<CompletionCandidate> {
+    with_jj(|_, settings| {
+        Ok([":builtin", ":ours", ":theirs"]
+            .into_iter()
+            .chain(merge_tools_filtered_by(settings, |tool| {
+                !tool.merge_args.is_empty()
+            }))
+            .map(CompletionCandidate::new)
+            .collect())
+    })
+}
+
+/// Approximate list of known diff editors
+pub fn diff_editors() -> Vec<CompletionCandidate> {
+    with_jj(|_, settings| {
+        Ok(std::iter::once(":builtin")
+            .chain(merge_tools_filtered_by(
+                settings,
+                // The args are empty only if `edit-args` are explicitly set to
+                // `[]` in TOML. If they are not specified, the default
+                // `["$left", "$right"]` value would be used.
+                |tool| !tool.edit_args.is_empty(),
+            ))
+            .map(CompletionCandidate::new)
+            .collect())
+    })
+}
+
+/// Approximate list of known diff tools
+pub fn diff_formatters() -> Vec<CompletionCandidate> {
+    let builtin_format_kinds = crate::diff_util::all_builtin_diff_format_names();
+    with_jj(|_, settings| {
+        Ok(builtin_format_kinds
+            .iter()
+            .map(|s| s.as_str())
+            .chain(merge_tools_filtered_by(
+                settings,
+                // The args are empty only if `diff-args` are explicitly set to
+                // `[]` in TOML. If they are not specified, the default
+                // `["$left", "$right"]` value would be used.
+                |tool| !tool.diff_args.is_empty(),
+            ))
+            .map(CompletionCandidate::new)
             .collect())
     })
 }
@@ -545,9 +690,9 @@ fn config_values(path: &ConfigNamePathBuf) -> Option<Vec<String>> {
         config_entry = json_keypath(&schema, reference, "/")?;
     };
 
-    if let Some(possibile_values) = config_entry.get("enum") {
+    if let Some(possible_values) = config_entry.get("enum") {
         return Some(
-            possibile_values
+            possible_values
                 .as_array()?
                 .iter()
                 .filter_map(|val| val.as_str())
@@ -625,14 +770,48 @@ pub fn branch_name_equals_any_revision(current: &std::ffi::OsStr) -> Vec<Complet
         .collect()
 }
 
-fn dir_prefix_from<'a>(path: &'a str, current: &str) -> Option<&'a str> {
-    path[current.len()..]
-        .split_once(std::path::MAIN_SEPARATOR)
-        .map(|(next, _)| path.split_at(current.len() + next.len() + 1).0)
+fn path_completion_candidate_from(
+    current_prefix: &str,
+    normalized_prefix_path: &Path,
+    path: &Path,
+    mode: Option<clap::builder::StyledStr>,
+) -> Option<CompletionCandidate> {
+    let normalized_prefix = match normalized_prefix_path.to_str()? {
+        "." => "", // `.` cannot be normalized further, but doesn't prefix `path`.
+        normalized_prefix => normalized_prefix,
+    };
+
+    let path = slash_path(path);
+    let mut remainder = path.to_str()?.strip_prefix(normalized_prefix)?;
+
+    // Trailing slash might have been normalized away in which case we need to strip
+    // the leading slash in the remainder away, or else the slash would appear
+    // twice.
+    if current_prefix.ends_with(std::path::is_separator) {
+        remainder = remainder.strip_prefix('/').unwrap_or(remainder);
+    }
+
+    match remainder.split_inclusive('/').at_most_one() {
+        // Completed component is the final component in `path`, so we're completing the file to
+        // which `mode` refers.
+        Ok(file_completion) => Some(
+            CompletionCandidate::new(format!(
+                "{current_prefix}{}",
+                file_completion.unwrap_or_default()
+            ))
+            .help(mode),
+        ),
+
+        // Omit `mode` when completing only up to the next directory.
+        Err(mut components) => Some(CompletionCandidate::new(format!(
+            "{current_prefix}{}",
+            components.next().unwrap()
+        ))),
+    }
 }
 
 fn current_prefix_to_fileset(current: &str) -> String {
-    let cur_esc = glob::Pattern::escape(current);
+    let cur_esc = globset::escape(current);
     let dir_pat = format!("{cur_esc}*/**");
     let path_pat = format!("{cur_esc}*");
     format!("glob:{dir_pat:?} | glob:{path_pat:?}")
@@ -642,6 +821,10 @@ fn all_files_from_rev(rev: String, current: &std::ffi::OsStr) -> Vec<CompletionC
     let Some(current) = current.to_str() else {
         return Vec::new();
     };
+
+    let normalized_prefix = normalize_path(Path::new(current));
+    let normalized_prefix = slash_path(&normalized_prefix);
+
     with_jj(|jj, _| {
         let mut child = jj
             .build()
@@ -649,6 +832,8 @@ fn all_files_from_rev(rev: String, current: &std::ffi::OsStr) -> Vec<CompletionC
             .arg("list")
             .arg("--revision")
             .arg(rev)
+            .arg("--template")
+            .arg(r#"path.display() ++ "\n""#)
             .arg(current_prefix_to_fileset(current))
             .stdout(std::process::Stdio::piped())
             .stderr(std::process::Stdio::null())
@@ -660,11 +845,8 @@ fn all_files_from_rev(rev: String, current: &std::ffi::OsStr) -> Vec<CompletionC
             .lines()
             .take(1_000)
             .map_while(Result::ok)
-            .map(|path| {
-                if let Some(dir_path) = dir_prefix_from(&path, current) {
-                    return CompletionCandidate::new(dir_path);
-                }
-                CompletionCandidate::new(path)
+            .filter_map(|path| {
+                path_completion_candidate_from(current, &normalized_prefix, Path::new(&path), None)
             })
             .dedup() // directories may occur multiple times
             .collect())
@@ -679,8 +861,19 @@ fn modified_files_from_rev_with_jj_cmd(
     let Some(current) = current.to_str() else {
         return Ok(Vec::new());
     };
+
+    let normalized_prefix = normalize_path(Path::new(current));
+    let normalized_prefix = slash_path(&normalized_prefix);
+
+    // In case of a rename, one entry of `diff` results in two suggestions.
+    let template = indoc! {r#"
+        concat(
+          status ++ ' ' ++ path.display() ++ "\n",
+          if(status == 'renamed', 'renamed.source ' ++ source.path().display() ++ "\n"),
+        )
+    "#};
     cmd.arg("diff")
-        .arg("--summary")
+        .args(["--template", template])
         .arg(current_prefix_to_fileset(current));
     match rev {
         (rev, None) => cmd.arg("--revisions").arg(rev),
@@ -689,56 +882,30 @@ fn modified_files_from_rev_with_jj_cmd(
     let output = cmd.output().map_err(user_error)?;
     let stdout = String::from_utf8_lossy(&output.stdout);
 
-    let mut candidates = Vec::new();
-    // store renamed paths in a separate vector so we don't have to sort later
-    let mut renamed = Vec::new();
-
-    'line_loop: for line in stdout.lines() {
-        let (mode, path) = line
-            .split_once(' ')
-            .expect("diff --summary should contain a space between mode and path");
-
-        fn path_to_candidate(current: &str, mode: &str, p: impl AsRef<str>) -> CompletionCandidate {
-            let p = p.as_ref();
-            if let Some(dir_path) = dir_prefix_from(p, current) {
-                return CompletionCandidate::new(dir_path);
-            }
-
-            let help = match mode {
-                "M" => "Modified".into(),
-                "D" => "Deleted".into(),
-                "A" => "Added".into(),
-                "R" => "Renamed".into(),
-                "C" => "Copied".into(),
-                _ => format!("unknown mode: '{mode}'"),
+    let mut include_renames = false;
+    let mut candidates: Vec<_> = stdout
+        .lines()
+        .filter_map(|line| line.split_once(' '))
+        .filter_map(|(mode, path)| {
+            let mode = match mode {
+                "modified" => "Modified".into(),
+                "removed" => "Deleted".into(),
+                "added" => "Added".into(),
+                "renamed" => "Renamed".into(),
+                "renamed.source" => {
+                    include_renames = true;
+                    "Renamed".into()
+                }
+                "copied" => "Copied".into(),
+                _ => format!("unknown mode: '{mode}'").into(),
             };
-            CompletionCandidate::new(p).help(Some(help.into()))
-        }
+            path_completion_candidate_from(current, &normalized_prefix, Path::new(path), Some(mode))
+        })
+        .collect();
 
-        // In case of a rename, one line of `diff --summary` results in
-        // two suggestions.
-        if mode == "R" {
-            'split_renamed_paths: {
-                let Some((prefix, rest)) = path.split_once('{') else {
-                    break 'split_renamed_paths;
-                };
-                let Some((rename, suffix)) = rest.split_once('}') else {
-                    break 'split_renamed_paths;
-                };
-                let Some((before, after)) = rename.split_once(" => ") else {
-                    break 'split_renamed_paths;
-                };
-                let before = format!("{prefix}{before}{suffix}");
-                let after = format!("{prefix}{after}{suffix}");
-                candidates.push(path_to_candidate(current, mode, before));
-                renamed.push(path_to_candidate(current, mode, after));
-                continue 'line_loop;
-            };
-        }
-
-        candidates.push(path_to_candidate(current, mode, path));
+    if include_renames {
+        candidates.sort_unstable_by(|a, b| Path::new(a.get_value()).cmp(Path::new(b.get_value())));
     }
-    candidates.extend(renamed);
     candidates.dedup();
 
     Ok(candidates)
@@ -755,6 +922,10 @@ fn conflicted_files_from_rev(rev: &str, current: &std::ffi::OsStr) -> Vec<Comple
     let Some(current) = current.to_str() else {
         return Vec::new();
     };
+
+    let normalized_prefix = normalize_path(Path::new(current));
+    let normalized_prefix = slash_path(&normalized_prefix);
+
     with_jj(|jj, _| {
         let output = jj
             .build()
@@ -769,16 +940,13 @@ fn conflicted_files_from_rev(rev: &str, current: &std::ffi::OsStr) -> Vec<Comple
 
         Ok(stdout
             .lines()
-            .map(|line| {
+            .filter_map(|line| {
                 let path = line
                     .split_whitespace()
                     .next()
                     .expect("resolve --list should contain whitespace after path");
 
-                if let Some(dir_path) = dir_prefix_from(path, current) {
-                    return CompletionCandidate::new(dir_path);
-                }
-                CompletionCandidate::new(path)
+                path_completion_candidate_from(current, &normalized_prefix, Path::new(path), None)
             })
             .dedup() // directories may occur multiple times
             .collect())
@@ -804,8 +972,21 @@ pub fn modified_range_files(current: &std::ffi::OsStr) -> Vec<CompletionCandidat
     }
 }
 
+/// Completes files in `@` *or* the `--from` revision (not the diff between
+/// `--from` and `@`)
+pub fn modified_from_files(current: &std::ffi::OsStr) -> Vec<CompletionCandidate> {
+    modified_files_from_rev((parse::from_or_wc(), None), current)
+}
+
 pub fn modified_revision_or_range_files(current: &std::ffi::OsStr) -> Vec<CompletionCandidate> {
     if let Some(rev) = parse::revision() {
+        return modified_files_from_rev((rev, None), current);
+    }
+    modified_range_files(current)
+}
+
+pub fn modified_changes_in_or_range_files(current: &std::ffi::OsStr) -> Vec<CompletionCandidate> {
+    if let Some(rev) = parse::changes_in() {
         return modified_files_from_rev((rev, None), current);
     }
     modified_range_files(current)
@@ -895,12 +1076,14 @@ fn get_jj_command() -> Result<(JjBuilder, UserSettings), CommandError> {
         .and_then(dunce::canonicalize)
         .map_err(user_error)?;
     // No config migration for completion. Simply ignore deprecated variables.
-    let mut config_env = ConfigEnv::from_environment(&ui);
+    let mut config_env = ConfigEnv::from_environment();
     let maybe_cwd_workspace_loader = DefaultWorkspaceLoaderFactory.create(find_workspace_dir(&cwd));
-    let _ = config_env.reload_user_config(&mut raw_config);
+    config_env.reload_user_config(&mut raw_config).ok();
     if let Ok(loader) = &maybe_cwd_workspace_loader {
         config_env.reset_repo_path(loader.repo_path());
-        let _ = config_env.reload_repo_config(&mut raw_config);
+        config_env.reload_repo_config(&mut raw_config).ok();
+        config_env.reset_workspace_path(loader.workspace_root());
+        config_env.reload_workspace_config(&mut raw_config).ok();
     }
     let mut config = config_env.resolve_config(&raw_config)?;
     // skip 2 because of the clap_complete prelude: jj -- jj <actual args...>
@@ -918,7 +1101,9 @@ fn get_jj_command() -> Result<(JjBuilder, UserSettings), CommandError> {
         // Try to update repo-specific config on a best-effort basis.
         if let Ok(loader) = DefaultWorkspaceLoaderFactory.create(&cwd.join(&repository)) {
             config_env.reset_repo_path(loader.repo_path());
-            let _ = config_env.reload_repo_config(&mut raw_config);
+            config_env.reload_repo_config(&mut raw_config).ok();
+            config_env.reset_workspace_path(loader.workspace_root());
+            config_env.reload_workspace_config(&mut raw_config).ok();
             if let Ok(new_config) = config_env.resolve_config(&raw_config) {
                 config = new_config;
             }
@@ -956,7 +1141,6 @@ fn get_jj_command() -> Result<(JjBuilder, UserSettings), CommandError> {
     for (kind, value) in args.early_args.merged_config_args(&arg_matches) {
         let arg = match kind {
             ConfigArgKind::Item => format!("--config={value}"),
-            ConfigArgKind::Toml => format!("--config-toml={value}"),
             ConfigArgKind::File => format!("--config-file={value}"),
         };
         cmd_args.push(arg);
@@ -995,16 +1179,18 @@ impl JjBuilder {
 /// multiple times, the parsing will pick any of the available ones, while the
 /// actual execution of the command would fail.
 mod parse {
-    pub(super) fn parse_flag<'a, I: Iterator<Item = String>>(
-        candidates: &'a [&str],
-        mut args: I,
-    ) -> impl Iterator<Item = String> + use<'a, I> {
+    pub(super) fn parse_flag(
+        candidates: &[&str],
+        mut args: impl Iterator<Item = String>,
+    ) -> impl Iterator<Item = String> {
         std::iter::from_fn(move || {
             for arg in args.by_ref() {
                 // -r REV syntax
                 if candidates.contains(&arg.as_ref()) {
                     match args.next() {
-                        Some(val) if !val.starts_with('-') => return Some(val),
+                        Some(val) if !val.starts_with('-') => {
+                            return Some(strip_shell_quotes(&val).into());
+                        }
                         _ => return None,
                     }
                 }
@@ -1021,7 +1207,7 @@ mod parse {
                         None => None,
                     }
                 }) {
-                    return Some(value.into());
+                    return Some(strip_shell_quotes(value).into());
                 };
             }
             None
@@ -1036,8 +1222,22 @@ mod parse {
         parse_revision_impl(std::env::args())
     }
 
+    pub fn parse_changes_in_impl(args: impl Iterator<Item = String>) -> Option<String> {
+        parse_flag(&["-c", "--changes-in"], args).next()
+    }
+
+    pub fn changes_in() -> Option<String> {
+        parse_changes_in_impl(std::env::args())
+    }
+
     pub fn revision_or_wc() -> String {
         revision().unwrap_or_else(|| "@".into())
+    }
+
+    pub fn from_or_wc() -> String {
+        parse_flag(&["-f", "--from"], std::env::args())
+            .next()
+            .unwrap_or_else(|| "@".into())
     }
 
     pub fn parse_range_impl<T>(args: impl Fn() -> T) -> Option<(String, String)>
@@ -1072,6 +1272,16 @@ mod parse {
     pub fn log_revisions() -> Vec<String> {
         let candidates = &["-r", "--revisions"];
         parse_flag(candidates, std::env::args()).collect()
+    }
+
+    fn strip_shell_quotes(s: &str) -> &str {
+        if s.len() >= 2
+            && (s.starts_with('"') && s.ends_with('"') || s.starts_with('\'') && s.ends_with('\''))
+        {
+            &s[1..s.len() - 1]
+        } else {
+            s
+        }
     }
 }
 
@@ -1147,16 +1357,25 @@ mod tests {
     #[test]
     fn test_config_keys() {
         // Just make sure the schema is parsed without failure.
-        let _ = config_keys();
+        config_keys();
     }
 
     #[test]
     fn test_parse_revision_impl() {
         let good_cases: &[&[&str]] = &[
             &["-r", "foo"],
+            &["-r", "'foo'"],
+            &["-r", "\"foo\""],
+            &["-rfoo"],
+            &["-r'foo'"],
+            &["-r\"foo\""],
             &["--revision", "foo"],
             &["-r=foo"],
+            &["-r='foo'"],
+            &["-r=\"foo\""],
             &["--revision=foo"],
+            &["--revision='foo'"],
+            &["--revision=\"foo\""],
             &["preceding_arg", "-r", "foo"],
             &["-r", "foo", "following_arg"],
         ];
@@ -1169,6 +1388,29 @@ mod tests {
             );
         }
         let bad_cases: &[&[&str]] = &[&[], &["-r"], &["foo"], &["-R", "foo"], &["-R=foo"]];
+        for case in bad_cases {
+            let args = case.iter().map(|s| s.to_string());
+            assert_eq!(parse::parse_revision_impl(args), None, "case: {case:?}");
+        }
+    }
+
+    #[test]
+    fn test_parse_changes_in_impl() {
+        let good_cases: &[&[&str]] = &[
+            &["-c", "foo"],
+            &["--changes-in", "foo"],
+            &["-cfoo"],
+            &["--changes-in=foo"],
+        ];
+        for case in good_cases {
+            let args = case.iter().map(|s| s.to_string());
+            assert_eq!(
+                parse::parse_changes_in_impl(args),
+                Some("foo".into()),
+                "case: {case:?}",
+            );
+        }
+        let bad_cases: &[&[&str]] = &[&[], &["-c"], &["-r"], &["foo"]];
         for case in bad_cases {
             let args = case.iter().map(|s| s.to_string());
             assert_eq!(parse::parse_revision_impl(args), None, "case: {case:?}");

@@ -2,7 +2,7 @@
   Git command: >
     `git init`
   Jujutsu command: >
-    `jj git init [--colocate]`
+    `jj git init [--no-colocate]`
   Notes: ''
 
 - Use case: Clone an existing repo
@@ -12,8 +12,8 @@
     `jj git clone <source> <destination> [--remote <remote name>]`
   Notes: There is no support for cloning non-Git repos yet.
 
-# TODO: Mention that you might need to do a `jj bookmark track branch@remote` to see the
-# bookmark in `jj log`.
+# TODO: Mention that you might need to do a `jj bookmark track branch` to see
+# the bookmark in `jj log`.
 - Use case: Update the local repo with all bookmarks/branches from a remote
   Git command: >
     `git fetch [<remote>]`
@@ -106,6 +106,13 @@
     `rm filename`
   Notes: ''
 
+- Use case: Remove a previously tracked file from the current change, but keep it in the working copy
+  Git command: >
+    `git rm --cached filename`
+  Jujutsu command: >
+    `jj file untrack filename`
+  Notes: 'File name must match an ignore pattern to remain untracked. See <a href="../working-copy/#introduction">the documentation for working copies</a> for more.'
+
 - Use case: Modify a file in the current change
   Git command: >
     `echo stuff >> filename`
@@ -120,25 +127,36 @@
     `jj commit`
   Notes: ''
 
-- Use case: See log of ancestors of the current commit
+- Use case: See compact log graph of ancestors of the current commit
   Git command: >
-    `git log --oneline --graph --decorate`
+    `git log --oneline --graph`
   Jujutsu command: >
     `jj log -r ::@`
   Notes: ''
 
-- Use case: See log of all reachable commits
+- Use case: See compact log graph of all reachable commits
   Git command: >
-    `git log --oneline --graph --decorate --branches`
+    `git log --oneline --graph --all`
   Jujutsu command: >
     `jj log -r 'all()'`
     or `jj log -r ::`
-  Notes: ''
+  Notes: >
+    In a Git-backed Jujutsu repository the Git command will also show all commits preserved by Jujutsu,
+    including hidden commits. To exclude all commits only preserved by Jujutsu, replace `--all` by `--exclude refs/jj/* --all`.
+    This will also exclude the Jujutsu-reachable commits though, if they are not Git-reachable.
 
-- Use case: Show log of commits not on the main branch
-  Git command: (TODO)
+- Use case: Show compact log graph of commits not on the main branch
+  Git command: >
+    `git log --oneline --graph --branches --not upstream/main`
   Jujutsu command: >
     `jj log`
+  Notes: ''
+
+- Use case: Show log of commits that have the string "stuff" in the changed lines
+  Git command: >
+    `git log -G stuff`
+  Jujutsu command: >
+    `jj log -r 'diff_contains(stuff)'`
   Notes: ''
 
 - Use case: List versioned files in the working copy
@@ -200,6 +218,13 @@
     `jj describe @-`
   Notes: ''
 
+- Use case: Edit description (commit message) of any change
+  Git command: >
+    `git commit --fixup=reword:X; git rebase --autosquash X^`
+  Jujutsu command: >
+    `jj describe X`
+  Notes: ''
+
 - Use case: Temporarily put away the current change
   Git command: >
     `git stash`
@@ -225,12 +250,19 @@
     `jj new @ A`
   Notes: ''
 
+- Use case: Check out a named revision (or branch) to examine source
+  Git command: >
+    `git checkout v1.0.1`
+  Jujutsu command: >
+    `jj new v1.0.1`
+  Notes: 'Creates new empty change on top (see `jj new main`)'
+
 - Use case: Move bookmark/branch A onto bookmark/branch B
   Git command: >
     `git rebase B A`
     (may need to rebase other descendant branches separately)
   Jujutsu command: >
-    `jj rebase -b A -d B`
+    `jj rebase -b A -o B`
   Notes: ''
 
 - Use case: Move change A and its descendants onto change B
@@ -238,7 +270,7 @@
     `git rebase --onto B A^ <some descendant bookmark>`
     (may need to rebase other descendant bookmarks separately)
   Jujutsu command: >
-    `jj rebase -s A -d B`
+    `jj rebase -s A -o B`
   Notes: ''
 
 - Use case: Reorder changes from A-B-C-D to A-C-B-D
@@ -264,7 +296,7 @@
 
 - Use case: Move the diff in the working copy into an ancestor
   Git command: >
-    `git commit --fixup=X; git rebase -i --autosquash X^`
+    `git commit --fixup=X; git rebase --autosquash X^`
   Jujutsu command: >
     `jj squash --into X`
   Notes: ''
@@ -312,7 +344,7 @@
   Git command: >
     `git co <destination>; git cherry-pick <source>`
   Jujutsu command: >
-    `jj duplicate <source> -d <destination>`
+    `jj duplicate <source> -o <destination>`
   Notes: ''
 
 - Use case: Find the root of the working copy (or check if in a repo)
@@ -342,7 +374,7 @@
     `git branch -f <name> <revision>`
   Jujutsu command: >
     `jj bookmark move <name> --to <revision>`
-    or `jj b m <name> --to <revision>` for short
+    or `jj b m <name> -t <revision>` for short
   Notes: ''
 
 - Use case: Move a bookmark/branch backward or sideways
@@ -368,15 +400,14 @@
 - Use case: Undo an earlier operation
   Git command: Not supported
   Jujutsu command: >
-    `jj [op] undo <operation ID>`
-  Notes: >
-    `jj undo` is an alias for `jj op undo`.
+    `jj undo`
+  Notes: 'A matching `jj redo` command exists as well.'
 
 - Use case: Create a commit that cancels out a previous commit
   Git command: >
     `git revert <revision>`
   Jujutsu command: >
-    `jj backout -r <revision>`
+    `jj revert -r <revision> -B @`
   Notes: ''
 
 - Use case: Show what revision and author last modified each line of a file

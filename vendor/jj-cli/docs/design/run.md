@@ -4,7 +4,6 @@ Authors: [Philip Metzger](mailto:philipmetzger@bluewin.ch), [Martin von Zweigber
 
 Initial Version, 10.12.2022 (view full history [here](https://docs.google.com/document/d/14BiAoEEy_e-BRPHYpXRFjvHMfgYVKh-pKWzzTDi-v-g/edit))
 
-
 **Summary:** This Document documents the design of a new `run` command for
 Jujutsu which will be used to seamlessly integrate with build systems, linters
 and formatters. This is achieved by running a user-provided command or script
@@ -80,7 +79,7 @@ unpredictable.
 
 **Large scale changes across repositories, local and remote:**
 
-- `jj run 'sed /some/test/' -r 'mine() & ~remote_bookmarks(exact:"origin")'`
+- `jj run 'sed /some/test/' -r 'mine() & ~remote_bookmarks("origin")'`
 - `jj run '$rewrite-tool' -r '$revset'`
 
 **Build systems:**
@@ -211,7 +210,6 @@ to a server. We might choose to defer any handling of this to the
 implementation of the command being invoked, instead of trying to
 communicate that information to jj.
 
-
 ## Command Options
 
 The base command of any jj command should be usable. By default `jj run` works
@@ -238,8 +236,7 @@ command)
 `jj st`: For now reprint the final output of `jj run`
 `jj op log`: No special handling needed, but awaits further discussion in
 [#963][issue]
-`jj undo/jj op undo`: No special handling needed
-
+`jj undo/jj op revert`: No special handling needed
 
 ## Open Points
 
@@ -259,8 +256,6 @@ to materialize.
 to Bazel's `select(..., message = "arch not supported for $project")`.
 - Make `jj run` asynchronous by spawning a `main` process, directly return to the
 user and incrementally updating the output of `jj st`.
-
-
 
 [git-branchless]: https://github.com/arxanas/git-branchless
 [issue]: https://github.com/jj-vcs/jj/issues/963

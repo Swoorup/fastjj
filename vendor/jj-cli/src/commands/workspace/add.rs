@@ -22,13 +22,14 @@ use jj_lib::ref_name::WorkspaceNameBuf;
 use jj_lib::repo::Repo as _;
 use jj_lib::rewrite::merge_commit_trees;
 use jj_lib::workspace::Workspace;
+use pollster::FutureExt as _;
 use tracing::instrument;
 
 use crate::cli_util::CommandHelper;
 use crate::cli_util::RevisionArg;
+use crate::command_error::CommandError;
 use crate::command_error::internal_error_with_message;
 use crate::command_error::user_error;
-use crate::command_error::CommandError;
 use crate::ui::Ui;
 
 /// How to handle sparse patterns when creating a new workspace.
@@ -49,13 +50,16 @@ enum SparseInheritance {
 #[derive(clap::Args, Clone, Debug)]
 pub struct WorkspaceAddArgs {
     /// Where to create the new workspace
+    #[arg(value_hint = clap::ValueHint::DirPath)]
     destination: String,
+
     /// A name for the workspace
     ///
     /// To override the default, which is the basename of the destination
     /// directory.
     #[arg(long)]
     name: Option<WorkspaceNameBuf>,
+
     /// A list of parent revisions for the working-copy commit of the newly
     /// created workspace. You may specify nothing, or any number of parents.
     ///
@@ -70,6 +74,7 @@ pub struct WorkspaceAddArgs {
     /// new r1 r2 r3 ...`.
     #[arg(long, short, value_name = "REVSETS")]
     revision: Vec<RevisionArg>,
+
     /// How to handle sparse patterns when creating a new workspace.
     #[arg(long, value_enum, default_value_t = SparseInheritance::Copy)]
     sparse_patterns: SparseInheritance,
@@ -83,11 +88,6 @@ pub fn cmd_workspace_add(
 ) -> Result<(), CommandError> {
     let old_workspace_command = command.workspace_helper(ui)?;
     let destination_path = command.cwd().join(&args.destination);
-    if destination_path.exists() {
-        return Err(user_error("Workspace already exists"));
-    } else {
-        fs::create_dir(&destination_path).context(&destination_path)?;
-    }
     let workspace_name = if let Some(name) = &args.name {
         name.to_owned()
     } else {
@@ -97,12 +97,23 @@ pub fn cmd_workspace_add(
             .ok_or_else(|| user_error("Destination path is not valid UTF-8"))?
             .into()
     };
+    if workspace_name.as_str().is_empty() {
+        return Err(user_error("New workspace name cannot be empty"));
+    }
+
     let repo = old_workspace_command.repo();
     if repo.view().get_wc_commit_id(&workspace_name).is_some() {
         return Err(user_error(format!(
             "Workspace named '{name}' already exists",
             name = workspace_name.as_symbol()
         )));
+    }
+    if !destination_path.exists() {
+        fs::create_dir(&destination_path).context(&destination_path)?;
+    } else if !file_util::is_empty_dir(&destination_path)? {
+        return Err(user_error(
+            "Destination path exists and is not an empty directory",
+        ));
     }
 
     let working_copy_factory = command.get_working_copy_factory()?;
@@ -147,11 +158,11 @@ pub fn cmd_workspace_add(
     };
 
     if let Some(sparse_patterns) = sparsity {
-        let checkout_options = new_workspace_command.checkout_options();
         let (mut locked_ws, _wc_commit) = new_workspace_command.start_working_copy_mutation()?;
         locked_ws
             .locked_wc()
-            .set_sparse_patterns(sparse_patterns, &checkout_options)
+            .set_sparse_patterns(sparse_patterns)
+            .block_on()
             .map_err(|err| internal_error_with_message("Failed to set sparse patterns", err))?;
         let operation_id = locked_ws.locked_wc().old_operation_id().clone();
         locked_ws.finish(operation_id)?;
@@ -179,15 +190,15 @@ pub fn cmd_workspace_add(
         }
     } else {
         old_workspace_command
-            .resolve_some_revsets_default_single(ui, &args.revision)?
+            .resolve_some_revsets(ui, &args.revision)?
             .iter()
             .map(|id| tx.repo().store().get_commit(id))
             .try_collect()?
     };
 
-    let tree = merge_commit_trees(tx.repo(), &parents)?;
+    let tree = merge_commit_trees(tx.repo(), &parents).block_on()?;
     let parent_ids = parents.iter().ids().cloned().collect_vec();
-    let new_wc_commit = tx.repo_mut().new_commit(parent_ids, tree.id()).write()?;
+    let new_wc_commit = tx.repo_mut().new_commit(parent_ids, tree).write()?;
 
     tx.edit(&new_wc_commit)?;
     tx.finish(

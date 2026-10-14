@@ -21,7 +21,7 @@ required:
 
 * `jj diff '~glob:**/*.rs'`
 
-[string-literals]: templates.md#string-literals
+[string-literals]: templates.md#stringliteral-type
 
 ## File patterns
 
@@ -29,19 +29,30 @@ The following patterns are supported. In all cases, we do not mention any shell
 quoting that might be necessary, and the quotes around `"path"` are optional if
 the path [has no special characters](#quoting-file-names).
 
-* `"path"` or `cwd:"path"`: Matches cwd-relative path prefix (file or files
-  under directory recursively.)
+By default, `"path"` is parsed as a `prefix-glob:` pattern, which matches
+cwd-relative path prefix.
+
+* `cwd:"path"`: Matches cwd-relative path prefix (file or files under directory
+  recursively.)
 * `file:"path"` or `cwd-file:"path"`: Matches cwd-relative file (or exact) path.
 * `glob:"pattern"` or `cwd-glob:"pattern"`: Matches file paths with cwd-relative
   Unix-style shell [wildcard `pattern`][glob]. For example, `glob:"*.c"` will
   match all `.c` files in the current working directory non-recursively.
+* `prefix-glob:"pattern"` or `cwd-prefix-glob:"pattern"`: Like `glob:`, but also
+  matches path prefix (file or files under directory recursively.) For example,
+  `prefix-glob:"*.d"` is equivalent to `glob:"*.d" | glob:"*.d/**"`.
 * `root:"path"`: Matches workspace-relative path prefix (file or files under
   directory recursively.)
 * `root-file:"path"`: Matches workspace-relative file (or exact) path.
 * `root-glob:"pattern"`: Matches file paths with workspace-relative Unix-style
   shell [wildcard `pattern`][glob].
+* `root-prefix-glob:"pattern"`: Like `root-glob:`, but also matches path prefix
+  (file or files under directory recursively.)
 
-[glob]: https://docs.rs/glob/latest/glob/struct.Pattern.html
+Glob patterns support case-insensitive matching by appending `-i` to the pattern
+name. For example, `glob-i:"*.TXT"` will match both `file.txt` and `FILE.TXT`.
+
+[glob]: https://docs.rs/globset/latest/globset/#syntax
 
 ## Operators
 
