@@ -65,14 +65,14 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          tag_args=()
+          # Keep the array nonempty: macOS Bash 3 treats an empty array as
+          # unbound under set -u, even when it was explicitly initialized.
+          package_args=(--binary "target/$TARGET/release/fastjj"
+                        --target "$TARGET" --commit "$SOURCE_COMMIT")
           if [[ -n "$RELEASE_TAG" ]]; then
-            tag_args=(--tag "$RELEASE_TAG")
+            package_args+=(--tag "$RELEASE_TAG")
           fi
-          python3 scripts/package_release.py \
-            --binary "target/$TARGET/release/fastjj" \
-            --target "$TARGET" --commit "$SOURCE_COMMIT" \
-            "${tag_args[@]}"
+          python3 scripts/package_release.py "${package_args[@]}"
       - uses: actions/upload-artifact@v4
         with:
           name: fastjj-${{ matrix.target }}
