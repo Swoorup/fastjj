@@ -1,22 +1,22 @@
 {
-  "version": "0.2.0",
-  "sourceCommit": "995b1d1388066769000abcdc210c0a86395c99c1",
+  "version": "0.2.1",
+  "sourceCommit": "70c216a194368955a041bf89fc4636876c5e0df8",
   "platforms": {
     "aarch64-darwin": {
       "target": "aarch64-apple-darwin",
-      "hash": "sha256-FYhp+vL4BZmlri80JCbZMhxCBiRlKWknFLntSWSH724="
+      "hash": "sha256-75WzrSrhvHL9UiLASIlIy6s3Tgf/OszFBQju2SrcMks="
     },
     "aarch64-linux": {
       "target": "aarch64-unknown-linux-gnu",
-      "hash": "sha256-0XHbnezNIGFk4JQO1R2Rlj/kkmJ4x+FiH/PAg8Fsd6c="
+      "hash": "sha256-OIsoDrZdsRcGPf0id2UBmfuK3IAWhy25XABbJ8FVVf4="
     },
     "x86_64-darwin": {
       "target": "x86_64-apple-darwin",
-      "hash": "sha256-hZXRqeEJlc3q6wXFic6W8xUTigURJmTcOARAsW+lSJU="
+      "hash": "sha256-VHRb3VCXgkh+JEqkW6+VqdYUPWrXjlcm2pczevZyQ04="
     },
     "x86_64-linux": {
       "target": "x86_64-unknown-linux-gnu",
-      "hash": "sha256-S6mJJO++OxGdZpAle1Mhfp0W8pfXjVCy92IVFXVw3vI="
+      "hash": "sha256-mJdV3rlC3wA9Nsmnce/Obg8eHo5h3w5iqNT+T78tB9M="
     }
   }
 }
