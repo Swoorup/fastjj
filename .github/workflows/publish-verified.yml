@@ -68,14 +68,28 @@ jobs:
           PY
       - name: Publish the verified archives without rebuilding
         run: |
+          # Creating an older tag can require permissions unavailable to the
+          # workflow token. Require an existing tag at the verified commit.
+          test "$(gh api "repos/$GH_REPO/commits/$RELEASE_TAG" --jq .sha)" = "$SOURCE_COMMIT"
           cd dist
           if gh release view "$RELEASE_TAG" >/dev/null 2>&1; then
-            gh release download "$RELEASE_TAG" --dir published
+            mkdir published
+            if [[ "$(gh release view "$RELEASE_TAG" --json assets --jq '.assets | length')" -gt 0 ]]; then
+              gh release download "$RELEASE_TAG" --dir published
+            fi
             for asset in ./*.tar.gz ./*.sha256; do
-              cmp "$asset" "published/${asset#./}"
+              if [[ -f "published/${asset#./}" ]]; then
+                cmp "$asset" "published/${asset#./}"
+              else
+                # Resume an interrupted upload without replacing any asset.
+                gh release upload "$RELEASE_TAG" "$asset"
+              fi
             done
+            if [[ "$(gh release view "$RELEASE_TAG" --json isDraft --jq .isDraft)" == true ]]; then
+              gh release edit "$RELEASE_TAG" --draft=false
+            fi
           else
             gh release create "$RELEASE_TAG" ./*.tar.gz ./*.sha256 \
-              --target "$SOURCE_COMMIT" --title "fastjj $RELEASE_TAG" \
+              --verify-tag --title "fastjj $RELEASE_TAG" \
               --notes "Verified native binaries from commit $SOURCE_COMMIT. All four targets passed the Release binaries workflow. See the bundled README, privacy documentation, and build-info.json. Assets are pinned by the Nix flake and must not be replaced."
           fi

@@ -78,6 +78,8 @@ the source commit in the manifest, and run `nix flake check` before pushing.
 The **Publish verified binaries** workflow can publish an existing successful
 **Release binaries** run without rebuilding: it checks the run's source commit,
 all archive hashes, and embedded provenance against the manifest before upload.
+Create the version tag at that source commit before dispatching the workflow.
+Interrupted uploads can be resumed; existing assets must match exactly.
 
 For private arguments, run `nix run github:Swoorup/fastjj -- --request-stdin < request.json`
 using the [request format below](#keep-the-clients-own-arguments-private).
