@@ -1,4 +1,4 @@
-//! Read private arguments from a bounded stdin JSON document, never from a child.
+//! Read bounded private JSON arguments from stdin or an inherited descriptor.
 
 use std::ffi::OsString;
 use std::io::{self, Read};
@@ -13,6 +13,24 @@ pub const MAX_REQUEST_BYTES: u64 = 1024 * 1024;
 pub struct Request {
     pub args: Vec<String>,
     pub cwd: Option<PathBuf>,
+    #[serde(default)]
+    pub prompt: bool,
+}
+
+/// Read a request from the fixed inherited descriptor, preserving stdin.
+pub fn read_fd() -> io::Result<Request> {
+    use std::os::fd::FromRawFd;
+    let mut stat: libc::stat = unsafe { std::mem::zeroed() };
+    // SAFETY: stat is writable and descriptor 3 is borrowed for validation.
+    if unsafe { libc::fstat(3, &mut stat) } < 0
+        || !matches!(stat.st_mode & libc::S_IFMT, libc::S_IFIFO | libc::S_IFSOCK)
+    {
+        return Err(io::Error::other(
+            "request descriptor 3 must be an inherited pipe or socket",
+        ));
+    }
+    // SAFETY: descriptor 3 was validated above and is consumed exactly once.
+    read(unsafe { std::fs::File::from_raw_fd(3) })
 }
 
 pub fn read(reader: impl Read) -> io::Result<Request> {
@@ -47,17 +65,13 @@ pub fn read(reader: impl Read) -> io::Result<Request> {
 
 /// Useful in-process implementations; the kernel policy remains the boundary.
 pub const PRIVACY_CONFIG: &str = r#"
-[git]
-subprocess = false
 [ui]
 pager = ":builtin"
 editor = ":builtin"
 diff-editor = ":builtin"
 merge-editor = ":builtin"
-[core]
-fsmonitor = "none"
-[debug]
-suppress-git2-deprecation-warning = true
+[fsmonitor]
+backend = "none"
 "#;
 
 /// Hand argv to jj verbatim, adding only its in-memory application name.

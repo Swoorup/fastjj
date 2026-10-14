@@ -1,6 +1,5 @@
 # Bookmarks
 
-
 ## Introduction
 
 Bookmarks are named pointers to revisions (just like branches are in Git). You
@@ -19,7 +18,7 @@ example, `jj git push --bookmark foo` will push the state of the `foo` bookmark
 to the `foo` branch on the Git remote. Similarly, if you create a `bar` branch
 in the backing Git repo, then a subsequent `jj git import` will create a `bar`
 bookmark (reminder: that import happens automatically in
-[colocated repos][colocated-repos]).
+[colocated workspaces][colocated-workspaces]).
 
 ## Remotes and tracked bookmarks
 
@@ -72,11 +71,11 @@ If you want to know the internals of bookmark tracking, consult the
 - A **tracked (remote) bookmark** is defined above. You can make a remote bookmark
   tracked with the [`jj bookmark track` command](#manually-tracking-a-bookmark), for
   example.
-- A **tracking (local) bookmark** is the local bookmark that `jj` tries to keep in
-  sync with the tracked remote bookmark. For example, after `jj bookmark track
-  mybookmark@origin`, there will be a local bookmark `mybookmark` that's tracking the
-  remote `mybookmark@origin` bookmark. A local bookmark can track a bookmark of the same
-  name on 0 or more remotes.
+- A **tracking (local) bookmark** is the local bookmark that `jj` tries to keep
+  in sync with the tracked remote bookmark. For example, after `jj bookmark
+  track mybookmark --remote=origin`, there will be a local bookmark `mybookmark`
+  that's tracking the remote `mybookmark@origin` bookmark. A local bookmark can
+  track a bookmark of the same name on 0 or more remotes.
 
 The notion of tracked bookmarks serves a similar function to the Git notion of an
 "upstream branch". Unlike Git, a single local bookmark can be tracking remote
@@ -85,9 +84,9 @@ must match.
 
 ### Manually tracking a bookmark
 
-To track a bookmark permanently use `jj bookmark track <bookmark name>@<remote name>`.
-It will now be imported as a local bookmark until you untrack it or it is deleted
-on the remote.
+To track a bookmark permanently use `jj bookmark track <bookmark name>
+--remote=<remote name>`. It will now be imported as a local bookmark until you
+untrack it or it is deleted on the remote.
 
 Example:
 
@@ -97,7 +96,7 @@ $ jj bookmark list --all
 $ # Find the bookmark.
 $ # [...]
 $ # Actually track the bookmark.
-$ jj bookmark track <bookmark name>@<remote name> # Example: jj bookmark track my-feature@origin
+$ jj bookmark track <bookmark name> --remote=<remote name> # Example: jj bookmark track my-feature --remote=origin
 $ # From this point on, <bookmark name> will be imported when fetching from <remote name>.
 $ jj git fetch --remote <remote name>
 $ # A local bookmark <bookmark name> should have been created or updated while fetching.
@@ -118,7 +117,7 @@ $ jj bookmark list --all
 $ # Find the bookmark we no longer want to track.
 $ # [...]
 # # Actually untrack it.
-$ jj bookmark untrack <bookmark name>@<remote name> # Example: jj bookmark untrack stuff@origin
+$ jj bookmark untrack <bookmark name> --remote=<remote name> # Example: jj bookmark untrack stuff --remote=origin
 $ # From this point on, this remote bookmark won't be imported anymore.
 $ # The local bookmark (e.g. stuff) is unaffected. It may or may not still
 $ # be tracking bookmarks on other remotes (e.g. stuff@upstream).
@@ -131,8 +130,7 @@ This command omits local Git-tracking bookmarks by default.
 
 You can see if a specific bookmark is tracked with `jj bookmark list --tracked <bookmark name>`.
 
-
-### Automatic tracking of bookmarks & `git.auto-local-bookmark` option
+### Automatic tracking of bookmarks & `auto-track-bookmarks` option
 
 There are two situations where `jj` tracks bookmarks automatically. `jj git
 clone` automatically sets up the default remote bookmark (e.g. `main@origin`) as
@@ -143,24 +141,25 @@ By default, every other remote bookmark is marked as "not tracked" when it's
 fetched. If desired, you need to manually `jj bookmark track` them. This works
 well for repositories where multiple people work on a large number of bookmarks.
 
-The default can be changed by setting the config `git.auto-local-bookmark = true`.
+The default can be changed by setting the config `remotes.<name>.auto-track-bookmarks = "*"`.
 Then, `jj git fetch` tracks every *newly fetched* bookmark with a local bookmark.
 Branches that already existed before the `jj git fetch` are not affected. This
 is similar to Mercurial, which fetches all its bookmarks (equivalent to Git's
-branches) by default.
+branches) by default. Similarly, all newly created local bookmarks
+will be marked as "tracked", preparing them to be pushed with
+the next `jj git push` command. See ["Automatic tracking of
+bookmarks"](config.md#automatic-tracking-of-bookmarks) for details.
 
-## Bookmark movement
+## Bookmark updates
 
-Currently Jujutsu automatically moves local bookmarks when these conditions are
+Currently Jujutsu automatically updates local bookmarks when these conditions are
 met:
 
  * When a commit has been rewritten (e.g, when you rebase) bookmarks and the
    working-copy will move along with it.
- * When a commit has been abandoned, all associated bookmarks will be moved
-   to its parent(s). If a working copy was pointing to the abandoned commit,
-   then a new working-copy commit will be created on top of the parent(s).
+ * When a commit has been abandoned, all associated bookmarks will be deleted.
 
-You could describe the movement as following along the change-id of the
+You could describe the updates as following along the change-id of the
 current bookmark commit, even if it isn't entirely accurate.
 
 ## Pushing bookmarks: Safety checks
@@ -193,13 +192,10 @@ makes several safety checks.
    override the bookmark on the remote.
 
 3. If the remote bookmark already exists on the remote, it must be
-   [tracked](#remotes-and-tracked-bookmarks). If the bookmark does not already
-   exist on the remote, there is no problem; `jj git push --allow-new` will
-   create the remote bookmark and mark it as tracked.
+   [tracked](#remotes-and-tracked-bookmarks).
 
 [^known-issue]: See "A general note on safety" in
     <https://git-scm.com/docs/git-push#Documentation/git-push.txt---no-force-with-lease>
-
 
 ## Conflicts
 
@@ -218,8 +214,8 @@ updated both locally and on a remote.
 
 To resolve a conflicted state in a local bookmark (e.g. `main`), you can move the
 bookmark to the desired target with `jj bookmark move`. You may want to first either
-merge the conflicted targets with `jj new` (e.g. `jj new 'all:main'`), or you may
-want to rebase one side on top of the other with `jj rebase`.
+merge the conflicted targets with `jj new` (e.g. `jj new main`), or you may want to
+rebase one side on top of the other with `jj rebase`.
 
 To resolve a conflicted state in a remote bookmark (e.g. `main@origin`), simply
 pull from the remote (e.g. `jj git fetch`). The conflict resolution will also
@@ -234,5 +230,5 @@ command itself through an alias (as `jj b`), and for its subcommands.
 For example, `jj bookmark create BOOKMARK-NAME -r@` can be abbreviated as
 `jj b c BOOKMARK-NAME -r@`.
 
-[colocated-repos]: git-compatibility.md#co-located-jujutsugit-repos
+[colocated-workspaces]: git-compatibility.md#colocated-jujutsugit-repos
 [design]: design/tracking-branches.md

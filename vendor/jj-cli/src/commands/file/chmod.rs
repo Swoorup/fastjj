@@ -18,11 +18,11 @@ use jj_lib::merged_tree::MergedTreeBuilder;
 use jj_lib::object_id::ObjectId as _;
 use tracing::instrument;
 
-use crate::cli_util::print_unmatched_explicit_paths;
 use crate::cli_util::CommandHelper;
 use crate::cli_util::RevisionArg;
-use crate::command_error::user_error;
+use crate::cli_util::print_unmatched_explicit_paths;
 use crate::command_error::CommandError;
+use crate::command_error::user_error;
 use crate::complete;
 use crate::ui::Ui;
 
@@ -32,6 +32,7 @@ enum ChmodMode {
     // We use short names for enum values so that errors say that the possible values are `n, x`.
     #[value(name = "n", alias("normal"))]
     Normal,
+
     /// Make a path executable (alias: executable)
     #[value(name = "x", alias("executable"))]
     Executable,
@@ -44,21 +45,15 @@ enum ChmodMode {
 #[derive(clap::Args, Clone, Debug)]
 pub(crate) struct FileChmodArgs {
     mode: ChmodMode,
+
     /// The revision to update
-    #[arg(
-        long, short,
-        default_value = "@",
-        value_name = "REVSET",
-        add = ArgValueCompleter::new(complete::revset_expression_mutable),
-    )]
+    #[arg(long, short, default_value = "@", value_name = "REVSET")]
+    #[arg(add = ArgValueCompleter::new(complete::revset_expression_mutable))]
     revision: RevisionArg,
+
     /// Paths to change the executable bit for
-    #[arg(
-        required = true,
-        value_name = "FILESETS",
-        value_hint = clap::ValueHint::AnyPath,
-        add = ArgValueCompleter::new(complete::all_revision_files),
-    )]
+    #[arg(required = true, value_name = "FILESETS", value_hint = clap::ValueHint::AnyPath)]
+    #[arg(add = ArgValueCompleter::new(complete::all_revision_files))]
     paths: Vec<String>,
 }
 
@@ -76,7 +71,7 @@ pub(crate) fn cmd_file_chmod(
     let mut workspace_command = command.workspace_helper(ui)?;
     let commit = workspace_command.resolve_single_rev(ui, &args.revision)?;
     workspace_command.check_rewritable([commit.id()])?;
-    let tree = commit.tree()?;
+    let tree = commit.tree();
     // TODO: No need to add special case for empty paths when switching to
     // parse_union_filesets(). paths = [] should be "none()" if supported.
     let fileset_expression = workspace_command.parse_file_patterns(ui, &args.paths)?;
@@ -84,8 +79,8 @@ pub(crate) fn cmd_file_chmod(
     print_unmatched_explicit_paths(ui, &workspace_command, &fileset_expression, [&tree])?;
 
     let mut tx = workspace_command.start_transaction();
-    let store = tree.store();
-    let mut tree_builder = MergedTreeBuilder::new(commit.tree_id().clone());
+
+    let mut tree_builder = MergedTreeBuilder::new(commit.tree());
     for (repo_path, result) in tree.entries_matching(matcher.as_ref()) {
         let mut tree_value = result?;
         let user_error_with_path = |msg: &str| {
@@ -107,17 +102,22 @@ pub(crate) fn cmd_file_chmod(
             return Err(user_error_with_path(message));
         }
         for value in tree_value.iter_mut().flatten() {
-            if let TreeValue::File { id: _, executable } = value {
+            if let TreeValue::File {
+                id: _,
+                executable,
+                copy_id: _,
+            } = value
+            {
                 *executable = executable_bit;
             }
         }
         tree_builder.set_or_remove(repo_path, tree_value);
     }
 
-    let new_tree_id = tree_builder.write_tree(store)?;
+    let new_tree = tree_builder.write_tree()?;
     tx.repo_mut()
         .rewrite_commit(&commit)
-        .set_tree_id(new_tree_id)
+        .set_tree(new_tree)
         .write()?;
     tx.finish(
         ui,

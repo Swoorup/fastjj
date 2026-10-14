@@ -18,17 +18,19 @@ use tracing::instrument;
 
 use super::ConfigLevelArgs;
 use crate::cli_util::CommandHelper;
+use crate::command_error::CommandError;
 use crate::command_error::user_error;
 use crate::command_error::user_error_with_message;
-use crate::command_error::CommandError;
 use crate::complete;
 use crate::ui::Ui;
 
 /// Update a config file to unset the given option.
 #[derive(clap::Args, Clone, Debug)]
 pub struct ConfigUnsetArgs {
-    #[arg(required = true, add = ArgValueCandidates::new(complete::leaf_config_keys))]
+    #[arg(required = true)]
+    #[arg(add = ArgValueCandidates::new(complete::leaf_config_keys))]
     name: ConfigNamePathBuf,
+
     #[command(flatten)]
     level: ConfigLevelArgs,
 }

@@ -14,8 +14,8 @@
 
 use tracing::instrument;
 
-use crate::cli_util::print_snapshot_stats;
 use crate::cli_util::CommandHelper;
+use crate::cli_util::print_snapshot_stats;
 use crate::command_error::CommandError;
 use crate::ui::Ui;
 
@@ -24,7 +24,7 @@ use crate::ui::Ui;
 /// See the [stale working copy documentation] for more information.
 ///
 /// [stale working copy documentation]:
-///     https://jj-vcs.github.io/jj/latest/working-copy/#stale-working-copy
+///     https://docs.jj-vcs.dev/latest/working-copy/#stale-working-copy
 #[derive(clap::Args, Clone, Debug)]
 pub struct WorkspaceUpdateStaleArgs {}
 

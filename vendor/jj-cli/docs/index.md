@@ -17,8 +17,8 @@ Additional help is available using the `jj help` command if you have
 
 You may want to jump to:
 
-- Documentation for the [latest released version of `jj`](https://jj-vcs.github.io/jj/latest).
-- Documentation for the [unreleased version of `jj`](https://jj-vcs.github.io/jj/prerelease). This version of the docs corresponds to the `main` branch of the `jj` repo.
+- Documentation for the [latest released version of `jj`](https://docs.jj-vcs.dev/latest).
+- Documentation for the [unreleased version of `jj`](https://docs.jj-vcs.dev/prerelease). This version of the docs corresponds to the `main` branch of the `jj` repo.
 
 ## Some useful links
 
@@ -26,5 +26,7 @@ You may want to jump to:
 - Overview of `jj` in the repo's [README](https://github.com/jj-vcs/jj?tab=readme-ov-file#readme)
 - [Installation and setup](install-and-setup.md)
 - [Tutorial and bird's eye view](tutorial.md)
+- [Working with Gerrit](gerrit.md)
 - [Working with GitHub](github.md)
 - [Development roadmap](roadmap.md)
+- [Changelog](changelog.md)

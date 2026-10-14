@@ -16,9 +16,8 @@ very large repos where detection would be too slow. See
 ## Forge integrations
 
 We would like to make it easier to work with various popular forges by providing
-something like `jj github submit`, `jj gitlab submit`, and `jj gerrit send`. For
-popular forges, we might include that support by default in the standard `jj`
-binary.
+something like `jj github submit` and `jj gitlab submit`. For popular forges, we
+might include that support by default in the standard `jj` binary.
 
 ## Submodule support
 
@@ -81,7 +80,6 @@ cheaply create temporary working copies for the commands to run in.
 We have talked about somehow using content-defined chunking (CDC) to reduce
 storage and transfer costs for large files. Maybe we will store files in our
 future cloud-based server using the same model as [XetHub][xet-storage].
-
 
 [api-design-doc]: https://docs.google.com/document/d/1rOKvutee5TVYpFhh_UDNZDxfUKyrJ8rjCNpFaNHOHwU/edit?usp=sharing&resourcekey=0-922ApyoAjuXN_uTKqmCqjg
 [copy-design-doc]: design/copy-tracking.md

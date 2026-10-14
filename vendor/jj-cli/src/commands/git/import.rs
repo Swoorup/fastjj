@@ -13,9 +13,11 @@
 // limitations under the License.
 
 use jj_lib::git;
+use jj_lib::git::GitSettings;
 
 use crate::cli_util::CommandHelper;
 use crate::command_error::CommandError;
+use crate::git_util::load_git_import_options;
 use crate::git_util::print_git_import_stats;
 use crate::ui::Ui;
 
@@ -23,6 +25,9 @@ use crate::ui::Ui;
 ///
 /// If a working-copy commit gets abandoned, it will be given a new, empty
 /// commit. This is true in general; it is not specific to this command.
+///
+/// There is no need to run this command if you're in colocated workspace
+/// because the import happens automatically there.
 #[derive(clap::Args, Clone, Debug)]
 pub struct GitImportArgs {}
 
@@ -32,12 +37,14 @@ pub fn cmd_git_import(
     _args: &GitImportArgs,
 ) -> Result<(), CommandError> {
     let mut workspace_command = command.workspace_helper(ui)?;
-    let git_settings = workspace_command.settings().git_settings()?;
+    let git_settings = GitSettings::from_settings(workspace_command.settings())?;
+    let remote_settings = workspace_command.settings().remote_settings()?;
+    let import_options = load_git_import_options(ui, &git_settings, &remote_settings)?;
     let mut tx = workspace_command.start_transaction();
-    // In non-colocated repo, Git HEAD will never be moved internally by jj.
+    // In non-colocated workspace, Git HEAD will never be moved internally by jj.
     // That's why cmd_git_export() doesn't export the HEAD ref.
     git::import_head(tx.repo_mut())?;
-    let stats = git::import_refs(tx.repo_mut(), &git_settings)?;
+    let stats = git::import_refs(tx.repo_mut(), &import_options)?;
     print_git_import_stats(ui, tx.repo(), &stats, true)?;
     tx.finish(ui, "import git refs")?;
     Ok(())

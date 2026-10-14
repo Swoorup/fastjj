@@ -2,7 +2,6 @@
 
 These are the config settings available to jj/Jujutsu.
 
-
 ## Config files and TOML
 
 `jj` loads several types of config settings:
@@ -17,13 +16,16 @@ config path --user`.
 - The repo settings. These can be edited with `jj config edit --repo` and are
 located in `.jj/repo/config.toml`.
 
+- The workspace settings. These can be edited with `jj config edit --workspace`
+and are located in `.jj/workspace-config.toml` in the workspace root.
+
 - Settings [specified in the command-line](#specifying-config-on-the-command-line).
 
 These are listed in the order they are loaded; the settings from earlier items
 in the list are overridden by the settings from later items if they disagree.
 Every type of config except for the built-in settings is optional.
 
-You can enable JSON Schema validation in your editor by adding a `$schema`
+You can enable JSON Schema validation in your editor by adding a `#:schema`
 reference at the top of your TOML config files. See [JSON Schema
 Support] for details.
 
@@ -69,7 +71,6 @@ then use whichever suits you in your config. If you mix dotted keys and headings
 
 That's probably enough TOML to keep you out of trouble but the [syntax guide] is
 very short if you ever need to check.
-
 
 ## User settings
 
@@ -128,15 +129,25 @@ You can also use a 6-digit hex code for more control over the exact color used:
 change_id = "#ff1525"
 ```
 
+`jj` also supports colors from the [ANSI 256-color palette] as `ansi-color-<N>`,
+where `<N>` is a number between 0 and 255:
+
+```toml
+[colors]
+commit_id = "ansi-color-81"
+```
+
+[ANSI 256-color palette]: https://en.wikipedia.org/wiki/ANSI_escape_code#8-bit
+
 If you use a string value for a color, as in the examples above, it will be used
 for the foreground color. You can also set the background color, reverse colors
-(swap foreground and background), or make the text bold, italic, or underlined.
-For that, you need to use a table:
+(swap foreground and background), or make the text bold, dim, italic, or
+underlined. For that, you need to use a table:
 
 ```toml
 [colors]
 commit_id = { fg = "green", bg = "#ff1525", bold = true, underline = true }
-change_id = { reverse = true, italic = true }
+change_id = { reverse = true, dim = false, italic = true }
 ```
 
 The key names are called "labels". The above used `commit_id` as label. You can
@@ -172,17 +183,14 @@ default-command = ["log", "--reversed"]
 ### Default description
 
 The editor content of a commit description can be populated by the
-`draft_commit_description` template.
+`draft_commit_description` template. `self` is a [`Commit`
+object](templates.md#commit-type).
 
 ```toml
 [templates]
 draft_commit_description = '''
 concat(
-  coalesce(description, default_commit_description, "\n"),
-  surround(
-    "\nJJ: This commit contains the following changes:\n", "",
-    indent("JJ:     ", diff.stat(72)),
-  ),
+  builtin_draft_commit_description,
   "\nJJ: ignore-rest\n",
   diff.git(),
 )
@@ -190,6 +198,7 @@ concat(
 ```
 
 You can override only the `default_commit_description` value if you like, e.g.:
+
 ```toml
 [template-aliases]
 default_commit_description = '''
@@ -204,7 +213,8 @@ Closes #NNNN
 
 By default, `jj duplicate` copies the descriptions from the original commits.
 You can customize this behavior by specifying the `duplicate_description`
-template, which is given a `Commit` type of the original commit.
+template, which is given a [`Commit` object](templates.md#commit-type) of the
+original commit.
 
 ```toml
 [templates]
@@ -218,31 +228,38 @@ concat(
 '''
 ```
 
-### Bookmark listing order
+### Bookmark/tag listing order
 
-By default, `jj bookmark list` displays bookmarks sorted alphabetically by name.
-You can customize this sorting behavior by specifying sort keys in your config
-file:
+By default, `jj bookmark list` and `jj tag list` display bookmarks and tags
+sorted alphabetically by name. You can customize this sorting behavior by
+specifying sort keys in your config file:
 
 ```toml
 [ui]
 bookmark-list-sort-keys = ["name"]
+tag-list-sort-keys = ["name"]
 ```
 
-The configuration works identically to using the `--sort` option for
-`jj bookmark list`. The following sort keys are supported: `name`, `author-name`,
-`author-email`, `author-date`, `committer-name`, `committer-email`,
-`committer-date`. Suffix the key with `-` to sort in descending order. Multiple
-keys can be supplied here, the first key is the most significant.
+The configuration works identically to using the `--sort` option. The following
+sort keys are supported: `name`, `author-name`, `author-email`, `author-date`,
+`committer-name`, `committer-email`, `committer-date`. Suffix the key with `-`
+to sort in descending order. Multiple keys can be supplied here, the first key
+is the most significant.
 
-When the `--sort` option is used with `jj bookmark list`, the configuration
-is ignored.
+When the `--sort` option is used, the configuration is ignored.
 
 ### Commit trailers
 
-You can configure automatic addition of trailers to commit descriptions using
-the `commit_trailers` template. Trailers defined in this template will only be
-added if they are not already present in the description.
+You can configure automatic addition of one or more trailers to commit
+descriptions using the `commit_trailers` template.
+
+Each line of the template is an individual trailer, usually in `Key: Value`
+format.
+
+Trailers defined in this template are deduplicated with the existing
+description: if the entire line of a trailer is already present, it will not be
+added again. To deduplicate based only on the trailer key, use the
+`trailers.contains_key(key)` method within the template.
 
 ```toml
 [templates]
@@ -253,12 +270,9 @@ format_signed_off_by_trailer(self)
 
 Some ready-to-use trailer templates are available for frequently used trailers:
 * `format_signed_off_by_trailer(commit)` creates a "Signed-off-by" trailer
-  using the committer info;
+  using the committer info.
 * `format_gerrit_change_id_trailer(commit)` creates a "Change-Id" trailer
   suitable to be used with Gerrit. It is based Jujutsu's change id.
-
-The `trailers.contains_key(key)` method can be used within the template to
-conditionally add a trailer if no other trailer with the same key exists.
 
 Existing trailers are also accessible via `commit.trailers()`.
 
@@ -276,12 +290,26 @@ can override the default style with the following keys:
 "diff token" = { reverse = true, underline = false }
 ```
 
+In color-words diffs, line numbers of context lines are rendered with decreased
+intensity to highlight changed lines. You can also decrease intensity of context
+contents.
+
+```toml
+[colors]
+# Dim context line numbers (default)
+"diff context line_number" = { dim = true }
+# Dim context line numbers and contents (applies to color-words and git diffs)
+"diff context" = { dim = true }
+```
+
 ### Diff format
 
 ```toml
 [ui]
-# Possible values: "color-words" (default), "git", "summary"
-diff.format = "git"
+# Builtin formats: ":color-words" (default), ":git",
+#                  ":summary", ":stat", ":types", ":name-only"
+# or external command name and arguments (see below)
+diff-formatter = ":git"
 ```
 
 #### Color-words diff options
@@ -333,15 +361,15 @@ context = 3
 
 ### Generating diffs by external command
 
-If `ui.diff.tool` is set, the specified diff command will be called instead of
-the internal diff function.
+If `ui.diff-formatter` is not a builtin format, the specified diff command will
+be called.
 
 ```toml
 [ui]
 # Use Difftastic by default
-diff.tool = ["difft", "--color=always", "$left", "$right"]
+diff-formatter = ["difft", "--color=always", "$left", "$right"]
 # Use tool named "<name>" (see below)
-diff.tool = "<name>"
+diff-formatter = "<name>"
 ```
 
 The external diff tool can also be enabled by `diff --tool <name>` argument.
@@ -356,13 +384,22 @@ diff-args = ["--color=always", "$left", "$right"]
 - `$left` and `$right` are replaced with the paths to the left and right
   directories to diff respectively.
 
+- `$width` is replaced with the number of terminal columns available to the diff
+  content.
+
+- If `diff-args` is not specified, `["$left", "$right"]` will be used by default.
+
+- If `diff-args = []`, `jj` will refuse to use this tool for diff formatting.
+  This is a way to explicitly state that a certain tool (e.g. `mergiraf`) does
+  not work for viewing diffs.
+
 By default `jj` will invoke external tools with a directory containing the left
-and right sides.  The `diff-invocation-mode` config can change this to file by file
+and right sides. The `diff-invocation-mode` config can change this to file by file
 invocations as follows:
 
 ```toml
 [ui]
-diff.tool = "vimdiff"
+diff-formatter = "vimdiff"
 
 [merge-tools.vimdiff]
 diff-invocation-mode = "file-by-file"
@@ -467,7 +504,6 @@ you can add this to your config:
 config_list = "builtin_config_list_detailed"
 ```
 
-
 ## Log
 
 ### Default revisions
@@ -483,22 +519,42 @@ log = "main@origin.."
 The default value for `revsets.log` is
 `'present(@) | ancestors(immutable_heads().., 2) | present(trunk())'`.
 
+### Prioritize Revsets in the Log over @
+
+In some situations the default graph can be hard to read, for example when working with big merges.
+To improve this behavior you can configure which revset in the `jj log` graph is displayed on
+the left instead of `@`.
+
+The following example will prioritize the change with the description "megamerge" with a fallback
+to `trunk()` in case no such change exists:
+
+```toml
+[revsets]
+log-graph-prioritize = 'coalesce(description("megamerge\n"), trunk())'
+```
+
 ### Default Template
 
 You can configure the template used when no `-T` is specified.
 
+- `templates.evolog` for `jj evolog`
 - `templates.log` for `jj log`
-- `templates.op_log` for `jj op log`
 - `templates.show` for `jj show`
+- `templates.op_log` for `jj op log`
+- `templates.op_show` for `jj op show`
 
 ```toml
 [templates]
+# Use builtin evolog template
+evolog = "builtin_evolog_compact"
 # Use builtin log template
 log = "builtin_log_compact"
-# Use builtin op log template
-op_log = "builtin_op_log_compact"
 # Use builtin show template
 show = "builtin_log_detailed"
+# Use builtin op log template
+op_log = "builtin_op_log_compact"
+# Use builtin op log template
+op_show = "builtin_op_log_compact"
 ```
 
 If you want to see the full description when you do `jj log` you can add this to
@@ -526,6 +582,7 @@ templates.
 - `templates.op_log_node` for operations (with `Operation` keywords)
 
 For example:
+
 ```toml
 [templates]
 log_node = '''
@@ -663,47 +720,28 @@ show-cryptographic-signatures = true
 '''
 ```
 
-## Allow "large" revsets by default
-
-Certain commands (such as `jj rebase`) can take multiple revset arguments, but
-default to requiring each of those revsets to expand to a *single* revision.
-This restriction can be overridden by prefixing a revset that the user wants to
-be able to expand to more than one revision with the [`all:`
-modifier](revsets.md#the-all-modifier).
-
-Another way you can override this check is by setting
-`ui.always-allow-large-revsets` to `true`. Then, `jj` will allow every one of
-the revset arguments of such commands to expand to any number of revisions.
-
-```toml
-[ui]
-# Assume `all:` prefix before revsets whenever it would make a difference
-always-allow-large-revsets = true
-```
-
 ## Pager
 
-The default pager is can be set via `ui.pager` or the `PAGER` environment
-variable. The priority is as follows (environment variables are marked with
-a `$`):
+By default, jj will paginate output that would scroll off the screen. It does
+this by passing output through `less -FRX` on most platforms (on Windows it uses
+[the pager](#builtin-pager) that is built-in to jj).
 
-`ui.pager` > `$PAGER`
+Which pager to use can be customized by setting `ui.pager`. When choosing a
+pager, ensure that it either supports color codes or that you disable color (see
+[Colorizing output](#colorizing-output)).
 
-`less -FRX` is the default pager in the absence of any other setting, except
-on Windows where it is `:builtin`.
-
-The special value `:builtin` enables usage of the [integrated
-pager](#builtin-pager).
-
-If you are using a standard Linux distro, your system likely already has
-`$PAGER` set and that will be preferred over the built-in. To use the built-in:
+Examples:
 
 ```shell
-jj config set --user ui.pager :builtin
-```
+# Pipe output through `less -FRX` (default on non-Windows platforms)
+$ jj config set --user ui.pager "less -FRX"
 
-It is possible the default will change to `:builtin` for all platforms in the
-future.
+# Use the built-in pager (default on Windows)
+$ jj config set --user ui.pager :builtin
+
+# Use `$PAGER` environment variable if set (on non-Windows platforms)
+$ jj config set --user ui.pager '["sh", "-c", "exec ${PAGER:-less -FRX}"]'
+```
 
 Additionally, paging behavior can be toggled via `ui.paginate` like so:
 
@@ -779,7 +817,6 @@ show-ruler = true # (default)
 show-ruler = false
 ```
 
-
 ### Processing contents to be paged
 
 If you'd like to pass the output through a formatter e.g.
@@ -794,14 +831,12 @@ pager = ["sh", "-c", "diff-so-fancy | less -RFX"]
 
 Some formatters (like [`delta`](https://github.com/dandavison/delta)) require
 git style diffs for formatting. You can configure this style of
-diff as the default with the `ui.diff` setting. For example:
+diff as the default with the `ui.diff-formatter` setting. For example:
 
 ```toml
 [ui]
 pager = "delta"
-
-[ui.diff]
-format = "git"
+diff-formatter = ":git"
 ```
 
 ## Aliases
@@ -840,7 +875,6 @@ my-script = ["util", "exec", "--", "my-jj-script"]
 #                            ^^^^
 # This makes sure that flags are passed to your script instead of parsed by jj.
 my-inline-script = ["util", "exec", "--", "bash", "-c", """
-#!/usr/bin/env bash
 set -euo pipefail
 echo "Look Ma, everything in one file!"
 echo "args: $@"
@@ -850,6 +884,9 @@ echo "args: $@"
 # are all included in "$@" and start at "$1" as expected.
 ```
 
+> Note: Shebangs (e.g. `#!/usr/bin/env`) aren't necessary since you're already
+> explicitly passing your script into the right shell.
+
 ## Editor
 
 The default editor is set via `ui.editor`, though there are several places to
@@ -858,7 +895,7 @@ a `$`):
 
 `$JJ_EDITOR` > `ui.editor` > `$VISUAL` > `$EDITOR`
 
-Pico is the default editor (Notepad on Windows) in the absence of any other
+Nano is the default editor (Notepad on Windows) in the absence of any other
 setting, but you could set it explicitly too.
 
 ```toml
@@ -892,7 +929,7 @@ Obviously, you would only set one line, don't copy them all in!
 ## Editing diffs
 
 The `ui.diff-editor` setting affects the default tool used for editing diffs
-(e.g.  `jj split`, `jj squash -i`). If it is not set, the special value
+(e.g. `jj split`, `jj squash -i`). If it is not set, the special value
 `:builtin` is used. It launches a built-in TUI tool (known as [scm-diff-editor])
 to edit the diff in your terminal.
 
@@ -929,6 +966,8 @@ edit-args = ["--newtab", "$left", "$right"]
 
 - If no `edit-args` are specified, `["$left", "$right"]` are set by default.
 
+- If `edit-args = []`, `jj` will refuse to use this tool for diff editing. This is a way to explicitly state that a certain tool (e.g. `mergiraf`) does not work for diff editing.
+
 Finally, `ui.diff-editor` can be a list that specifies a command and its arguments.
 
 Some examples:
@@ -942,7 +981,6 @@ diff-editor = ["/path/to/binary", "--be-helpful", "$left", "$right"]
 # Equivalent to ["binary", "$left", "$right"] arguments by default
 diff-editor = "binary"
 ```
-
 
 ### Experimental 3-pane diff editing
 
@@ -999,7 +1037,6 @@ With that configuration, you should be able to simply `ssh myhost`.
 
 </details>
 
-
 Setting either `ui.diff-editor = "meld-3"` or `ui.diff-editor = "diffedit3"`
 will result in the diff editor showing 3 panes: the diff on the left and right,
 and an editing pane in the middle. This allow you to see both sides of the
@@ -1050,7 +1087,7 @@ Using `ui.diff-editor = "vimdiff"` is possible but not recommended. For a better
 experience, you can follow [instructions from the Wiki] to configure the
 [DirDiff Vim plugin] and/or the [vimtabdiff Python script].
 
-[instructions from the Wiki]: https://github.com/jj-vcs/jj/wiki/Vim#using-vim-as-a-diff-tool
+[instructions from the Wiki]: https://github.com/jj-vcs/jj/wiki/Vim,-Neovim#using-vim-as-a-diff-tool
 
 [DirDiff Vim plugin]: https://github.com/will133/vim-dirdiff
 [vimtabdiff Python script]: https://github.com/balki/vimtabdiff
@@ -1121,12 +1158,20 @@ merge-tool-edits-conflict-markers = true    # See below for an explanation
   and/or generates conflict markers. Usually, `jj` uses conflict markers of
   length 7, but they can be longer if necessary to make parsing unambiguous.
 
+- `$path` is replaced with the path in the repository at which the file
+  will be eventually stored. It is relative to the root directory of the
+  repository and uses `/` as separators.
+
+Unlike `diff-args` or `edit-args`, there is no default value for `merge-args`.
+If `merge-args` are not specified, the tool cannot be used for conflict
+resolution.
+
 ### Editing conflict markers with a tool or a text editor
 
 By default, the merge tool starts with an empty output file. If the tool puts
 anything into the output file and exits with the 0 exit code,
 `jj` assumes that the conflict is fully resolved, while if the tool exits with
-a non-zero exit code, `jj` assumes that the merge should be cancelled.
+a non-zero exit code, `jj` assumes that the merge should be canceled.
 This is appropriate for most graphical merge tools.
 
 For merge tools which try to automatically resolve conflicts without user input,
@@ -1158,19 +1203,46 @@ The conflict marker style can also be customized per tool using the
 
 The `jj fix` command allows you to efficiently rewrite files in complex commit
 graphs with no risk of introducing conflicts, using tools like `clang-format` or
-`prettier`. The tools run as subprocesses that take file content on standard
-input and repeat it, with any desired changes, on standard output. The file is
-only rewritten if the subprocess produces a successful exit code.
+`prettier`. The tools run as subprocesses that take a file content on standard
+input and repeat it, with any desired changes, on standard output.
+
+This enables the command to format many versions of the same file concurrently
+and without touching on the working copy. The local files are not and must not
+be used.
+
+The file is only rewritten if the subprocess produces a successful exit code.
+
+### Configuration
+
+Tools are defined in a table where the keys are arbitrary identifiers and
+the values have the following properties:
+ - `command`: The arguments used to run the tool. The first argument is the
+   path to an executable file. Arguments can contain these variables that will
+   be replaced:
+   - `$root` will be replaced with the workspace root path (the directory
+     containing the .jj directory).
+   - `$path` will be replaced with the repo-relative path of the file being
+     fixed. It is useful to provide the path to tools that include the path
+     in error messages, or behave differently based on the directory or file
+     name.
+ - `patterns`: List of filesets (see: `jj help -k filesets`), determining
+   which files the tool will affect based on their path. If this list is
+   empty, no files will be affected by the tool. If there are multiple
+   patterns, the tool is applied only once to each file in the union of the
+   patterns.
+ - `enabled`: Enables or disables the tool. If omitted, the tool is enabled.
+   This is useful for defining disabled tools in user configuration that can
+   be enabled in individual repositories with one config setting.
+
+`jj fix` provides the file content anonymously on standard input, but the name
+of the file being formatted may be important for include sorting or other output
+like error messages. To address this, you can use the `$root` and `$path` in
+your arguments.
 
 ### Enforce coding style rules
 
 Suppose you want to use `clang-format` to format your `*.c` and `*.h` files,
 as well as sorting their `#include` directives.
-
-`jj fix` provides the file content anonymously on standard input, but the name
-of the file being formatted may be important for include sorting or other output
-like error messages. To address this, you can use the `$path` substitution to
-provide the name of the file in a command argument.
 
 ```toml
 [fix.tools.clang-format]
@@ -1192,13 +1264,32 @@ command = ["sort", "-u"]
 patterns = ["word_list.txt"]
 ```
 
+### Tools stored inside the workspace
+
+Some fix tools may be stored inside the workspace. For example, a binary may be
+stored inside `node_modules`. Use the `$root` variable to create an absolute
+path to such a program:
+
+```toml
+[fix.tools.biome]
+
+# Linux and macOS
+command = ["$root/node_modules/@biomejs/cli-linux-x64/biome"]
+
+# Windows
+command = ["$root\\node_modules\\@biomejs\\cli-win32-x64\\biome.exe"]
+```
+
 ### Execution order of tools
 
 If two or more tools affect the same file, they are executed in the ascending
-lexicographical order of their configured names. This will remain as a tie
-breaker if other ordering mechanisms are introduced in the future. If you use
-numbers in tool names to control execution order, remember to include enough
-leading zeros so that, for example, `09` sorts before `10`.
+lexicographical order of their configured names. Any tool, but the first one to
+be executed, get as input the content of the file produced by the previous
+tool. This will remain as a tie breaker if other ordering mechanisms are
+introduced in the future.
+
+If you use numbers in tool names to control execution order, remember to
+include enough leading zeros so that, for example, `09` sorts before `10`.
 
 Suppose you want to keep only the 10 smallest numbers in a text file that
 contains one number on each line. This can be accomplished with `sort` and
@@ -1333,6 +1424,16 @@ as follows:
 backends.ssh.allowed-signers = "/path/to/allowed-signers"
 ```
 
+Additionally, an SSH KRL or list of revoked public keys (see
+[ssh-keygen man page](https://man.openbsd.org/ssh-keygen#KEY_REVOCATION_LISTS)) can be provided
+with the `revocation-list` option. If a public key is found in this file then any signature
+relating to it is marked as invalid.
+
+```toml
+[signing]
+backends.ssh.revocation-list = "/path/to/revocation-list"
+```
+
 ### Manually signing commits
 
 You can use [`jj sign`](./cli-reference.md#jj-sign)/[`jj unsign`](./cli-reference.md#jj-unsign)
@@ -1390,6 +1491,20 @@ signature details.
 
 ## Git settings
 
+### Default colocation
+
+When creating a Git-backed Jujutsu repository, they use "colocated" mode by
+default, which places the `.git` directory next to the `.jj` directory.
+Colocation allows some amount of two-way interoperability, but it can perform
+worse in large repos.
+
+The setting `git.colocate` is a boolean option that controls whether or not the
+`jj git init` and `jj git clone` commands should create colocated workspace by
+default. Set `git.colocate` to `false` to disable it.
+
+See [Colocated Jujutsu/Git workspaces](git-compatibility.md#colocated-jujutsugit-repos)
+for more information.
+
 ### Default remotes for `jj git fetch` and `jj git push`
 
 By default, if a single remote exists it is used for `jj git fetch` and `jj git
@@ -1406,12 +1521,12 @@ jj config set --repo git.fetch "upstream"
 jj config set --repo git.fetch '["origin", "upstream"]'
 ```
 
-By default, the specified remote names matches exactly. You can also use a
-[string pattern](revsets.md#string-patterns) to select remotes using patterns:
+By default, the specified pattern matches remote names with glob syntax. You can
+also use other [string pattern syntax](revsets.md#string-patterns):
 
 ```sh
-jj config set --repo git.fetch "glob:*"
-jj config set --repo git.fetch '["glob:remote*", "glob:upstream*"]'
+jj config set --repo git.fetch "regex:'^(remote|upstream)'"
+jj config set --repo git.fetch '["remote*", "upstream*"]'
 ```
 
 Similarly, you can also set the variable `git.push` to cause `jj git push` to
@@ -1425,33 +1540,73 @@ Note that unlike `git.fetch`, `git.push` can currently only be a single remote.
 This is not a hard limitation, and could be changed in the future if there is
 demand.
 
-### Automatic local bookmark creation
+### Automatic tracking of bookmarks
 
-When `jj` imports a new remote-tracking bookmark from Git, it can also create a
-local bookmark with the same name. This feature is disabled by default because it
-may be undesirable in some repositories, e.g.:
+You can configure which bookmarks to track automatically per remote, using the
+`remotes.<name>.auto-track-bookmarks` config. The value is a
+[string pattern](./revsets.md#string-patterns) that matches the names of the
+bookmarks to track. This setting is applied to all new bookmarks, including ones
+created locally and ones fetched from the remote. For example:
 
-- There is a remote with a lot of historical bookmarks that you don't
-  want to be exported to the co-located Git repo.
-- There are multiple remotes with conflicting views of that bookmark,
-  resulting in an unhelpful conflicted state.
+```toml
+[remotes.origin]
+auto-track-bookmarks = "*"
+```
 
-You can enable this behavior by setting `git.auto-local-bookmark` like so,
+This will simply track all bookmarks for the remote "origin". There are various
+reasons to restrict which bookmarks to track:
+
+- When collaborating with other people via the same remote, you may not want to
+  track all the bookmarks of your collaborators. Similarly, you may not want to
+  push some of your bookmarks to the remote at all; these may only be intended
+  for local use. Many people use a "personal prefix" in their bookmark names.
+  This marks a bookmark as belonging to one person, making it possible to track
+  and push only bookmarks with that prefix. For example, Alice may set her
+  configuration like so:
+
+  ```toml
+  [remotes.origin]
+  auto-track-bookmarks = "alice/*"
+  ```
+
+  That way, bookmarks pushed by other people (who probably use a different
+  prefix or none at all) are not tracked automatically. At the same time, Alice
+  can create bookmarks without the prefix for local-only use. You can also
+  configure Jujutsu to use your prefix for generated bookmark names; see the
+  section
+  ["Generated bookmark names on push"](#generated-bookmark-names-on-push).
+
+- Another reason to restrict the bookmarks to track may be that you're not
+  collaborating with people using the same remote, but a different one. For
+  example, if you make a fork on GitHub, your fork will usually be called
+  "origin", while the repository you forked from is usually called "upstream".
+  In that case, you may want to track all bookmarks from your fork, but only the
+  "main" bookmark from upstream. Here's an example how to achieve that:
+
+  ```toml
+  [remotes.origin]
+  auto-track-bookmarks = "*"
+  [remotes.upstream]
+  auto-track-bookmarks = "main"
+  ```
+
+- Lastly, you may be working on various projects with different conventions for
+  bookmark names. In that case, it can be handy to apply different configuration
+  to different (groups of) repositories. Read about how to do that in the
+  section ["Conditional variables"](#conditional-variables).
+
+### Automatic local bookmark creation on `jj git clone`
+
+When cloning a new Git repository, `jj` by default creates a local bookmark
+tracking the default remote bookmark (such as `main` for `main@origin`.) If you
+aren't going to update the `main` bookmark locally, the tracking bookmark isn't
+necessary.
+
+This behavior can be disabled by
 
 ```toml
 [git]
-auto-local-bookmark = true
-```
-
-This setting is applied only to new remote bookmarks. Existing remote bookmarks
-can be tracked individually by using `jj bookmark track`/`untrack` commands.
-
-```shell
-# import feature1 bookmark and start tracking it
-jj bookmark track feature1@origin
-# delete local gh-pages bookmark and stop tracking it
-jj bookmark delete gh-pages
-jj bookmark untrack gh-pages@upstream
+track-default-bookmark-on-clone = false
 ```
 
 ### Abandon commits that became unreachable in Git
@@ -1469,16 +1624,19 @@ abandon-unreachable-commits = false
 
 [reachable]: https://git-scm.com/docs/gitglossary/#Documentation/gitglossary.txt-aiddefreachableareachable
 
-### Prefix for generated bookmarks on push
+### Generated bookmark names on push
 
 `jj git push --change` generates bookmark names with a prefix of "push-" by
-default. You can pick a different prefix by setting `git.push-bookmark-prefix`. For
-example:
+default. You can pick a different prefix and formatting by setting the
+`templates.git_push_bookmark` template. For example:
 
 ```toml
-[git]
-push-bookmark-prefix = "martinvonz/push-"
+[templates]
+git_push_bookmark = '"martinvonz/push-" ++ change_id.short()'
 ```
+
+This template should include expressions like `change_id` to generate unique and
+stable bookmark.
 
 ### Set of private commits
 
@@ -1489,7 +1647,7 @@ unset, all commits are eligible to be pushed.
 ```toml
 [git]
 # Prevent pushing work in progress or anything explicitly labeled "private"
-private-commits = "description(glob:'wip:*') | description(glob:'private:*')"
+private-commits = "description('wip:*') | description('private:*')"
 ```
 
 If a commit is in `git.private-commits` but is already on the remote, then it is
@@ -1499,9 +1657,9 @@ from the private set.
 Private commits prevent their descendants from being pushed, since doing so
 would require pushing the private commit as well.
 
-### Git subprocessing behaviour
+### Git subprocessing behavior
 
-By default, Git remote interactions are handled by spawning a `git` subprocess.
+Git remote interactions are handled by spawning a `git` subprocess.
 If `git` is not on your OS path, or you want to specify a particular binary,
 you can:
 
@@ -1510,20 +1668,37 @@ you can:
 executable-path = "/path/to/git"
 ```
 
-Previously, remote interactions were handled by
-[`libgit2`](https://github.com/libgit2/libgit2) by default, which sometimes
-caused [SSH problems](https://github.com/jj-vcs/jj/issues/4979) that could not
-be solved by `jj` directly. If you have any issues with the `git`
-subprocessing, you can switch back to `libgit2` with:
+## Merge settings
+
+### Granularity of hunks
+
+`jj` by default resolves content conflicts by splitting text into line-level
+hunks and merge them. This can be configured to split hunks further into
+word-level hunks.
+
+* `line`: split into line hunks (default)
+* `word`: split into word hunks
 
 ```toml
-[git]
-subprocess = false
+[merge]
+hunk-level = "line"
 ```
 
-Note that `libgit2` support will be removed in 0.30, so you are encouraged to
-[report any issues](https://github.com/jj-vcs/jj/issues) you experience with
-the default configuration.
+### Resolution of same-change conflicts
+
+`jj` by default resolves conflicts if all sides made the same change. This
+matches what Git and Mercurial do (in the 3-way case at least), but not what
+Darcs does. It also means that repeated 3-way merging of multiple trees may give
+different results depending on the order of merging. To turn it off, set
+`same-change = "keep"`.
+
+* `keep`: leave same-change conflict unresolved
+* `accept`: resolve same-change conflict to new value (default)
+
+```toml
+[merge]
+same-change = "accept"
+```
 
 ## Filesystem monitor
 
@@ -1531,21 +1706,26 @@ In large repositories, it may be beneficial to use a "filesystem monitor" to
 track changes to the working copy. This allows `jj` to take working copy
 snapshots without having to rescan the entire working copy.
 
-This is governed by the `core.fsmonitor` option. Currently, the valid values are
-`"none"` or `"watchman"`.
+This is governed by the `fsmonitor.backend` option. Currently, the valid values
+are `"none"` or `"watchman"`.
 
 ### Watchman
 
 To configure the Watchman filesystem monitor, set
-`core.fsmonitor = "watchman"`. Ensure that you have [installed the Watchman
+`fsmonitor.backend = "watchman"`. Ensure that you have [installed the Watchman
 executable on your system](https://facebook.github.io/watchman/docs/install).
 
 You can configure `jj` to use watchman triggers to automatically create
 snapshots on filesystem changes by setting
-`core.watchman.register-snapshot-trigger = true`.
+`fsmonitor.watchman.register-snapshot-trigger = true`.
 
 You can check whether Watchman is enabled and whether it is installed correctly
 using `jj debug watchman status`.
+
+Note: `watchman` heavily uses `inotify` and sets up a user watch per-file. On
+large repositories, this may cause `watchman` to fail and commands like
+`jj status` to take longer than expected. If you experience this run
+`jj debug watchman status` and tune your `inotify` limits.
 
 ## Snapshot settings
 
@@ -1556,6 +1736,9 @@ tracked by default. You can set the `snapshot.auto-track` to set which paths
 get automatically tracked when they're added to the working copy. See the
 [fileset documentation](filesets.md) for the syntax. Files with paths matching
 [ignore files](working-copy.md#ignored-files) are never tracked automatically.
+
+If you set `snapshot.auto-track` to a non-default value, untracked files can be
+tracked with `jj file track`.
 
 You can use `jj file untrack` to untrack a file while keeping it in the working
 copy. However, first [ignore](working-copy.md#ignored-files) them or remove them
@@ -1583,6 +1766,98 @@ raw integer literal, the value is interpreted as if it were specified in bytes.
 Files that already exist in the working copy are not subject to this limit.
 
 Setting this value to zero will disable the limit entirely.
+
+### Automatic update of stale working copies
+
+When a working copy becomes stale (meaning the working copy's recorded commit is
+no longer the current commit for that workspace), `jj` will normally prompt you
+to update it with `jj workspace update-stale`. You can configure `jj` to
+automatically update stale working copies by setting:
+
+```toml
+[snapshot]
+auto-update-stale = true
+```
+
+This is particularly useful if you have [multiple workspaces](working-copy.md#workspaces)
+and want to avoid manually updating each one.
+
+For more information on stale working copies, see the [working copy
+documentation](working-copy.md#stale-working-copy).
+
+## Working copy settings
+
+### EOL conversion settings
+
+This settings serves the same purpose as the [`core.autocrlf`][git-autocrlf] git
+config.
+
+The line endings conversion won't be applied to files detected as binary files
+via a heuristics[^1] regardless of the settings. This is similar to git.
+
+```toml
+[working-copy]
+# No EOL conversion. Similar to core.autocrlf = false.
+eol-conversion = "none"
+# Apply CRLF to LF EOL conversion when we check files in the backend store from
+# the local file system but not apply EOL conversion when we check out the code
+# from the backend store to the local file system. Similar to core.autocrlf =
+# input.
+eol-conversion = "input"
+# Setting this to "input-output" if you want to have CRLF line endings in your
+# working directory and the repository has LF line endings. Similar to
+# core.autocrlf = true.
+eol-conversion = "input-output"
+```
+
+[git-autocrlf]: https://git-scm.com/book/en/v2/Customizing-Git-Git-Configuration#_core_autocrlf
+[gitoxide-is-binary]: https://github.com/GitoxideLabs/gitoxide/blob/073487b38ed40bcd7eb45dc110ae1ce84f9275a9/gix-filter/src/eol/utils.rs#L98-L100
+[git-is-binary]: https://github.com/git/git/blob/f1ca98f609f9a730b9accf24e5558a10a0b41b6c/convert.c#L94-L103
+[^1]: To detect if a file is binary, Jujutsu currently checks if there is NULL
+      byte in the file which is different from the algorithm of
+      [`gitoxide`][gitoxide-is-binary] or [`git`][git-is-binary]. Jujutsu
+      doesn't plan to align the binary detection logic with git.
+
+### Respect or ignore executable bit permission changes
+
+Whether to respect or ignore changes to the executable bit for files on Unix.
+This option is unused on Windows.
+
+```toml
+[working-copy]
+exec-bit-change = "respect" | "ignore" | "auto" (default)
+```
+
+On Unix systems, files have a permission bit for whether they are executable as
+scripts or binary code. Jujutsu stores this state in the repository and will
+update it for files as you operate on a repository. If you set your working
+copy to a commit where a file is recorded as executable or not, `jj` will
+adjust the permission of that file. If you change a file's executable bit
+through the filesystem, `jj` will record that change when taking a snapshot.
+
+Setting this to `"ignore"` will make Jujutsu ignore the executable bit on the
+filesystem when updating the state for the repository. In addition, `jj` will
+not attempt to modify a file's executable bit and will add new files as
+"not executable." This is already the behavior on Windows, and having the
+option to enable this behavior is useful for Unix users dual-booting Windows,
+Windows users accessing files from WSL, or anyone experimenting with other
+filesystem configurations.
+
+On Unix if `"auto"` is set (the default), `jj` will try to detect whether the
+filesystem supports changing executable bits to choose between `"respect"` or
+`"ignore"`. On errors, we assume `"respect"`, except if permission was denied
+which will assume `"ignore"`.
+
+On Windows, files have no executable bit so this option is unused.
+
+You can always use `jj file chmod` to update the recorded executable bit for a
+file manually. If this option is `"respect"`, `jj` will also attempt to
+propagate that change to the filesystem.
+
+Note that if you modify a file's executable bit before changing this setting
+from `"ignore"` or  `"auto"` to `"respect"`, `jj` may not update the stored
+executable bit until you modify the file's contents or update its modification
+time, e.g. with `touch`.
 
 ## Ways to specify `jj` config: details
 
@@ -1615,11 +1890,6 @@ with [Conditional Variables](#conditional-variables).
 | Linux and macOS | `$XDG_CONFIG_HOME` or `$HOME/.config` | `/home/alice/.config/jj/config.toml`                      |
 | Windows         | `{FOLDERID_RoamingAppData}`           | `C:\Users\Alice\AppData\Roaming\jj\config.toml`           |
 
-On macOS, jj used to put the user config in `~/Library/Application Support`,
-and jj will still look there for backwards compatibility purposes; this is
-considered a deprecated location, and you should use the new default
-`XDG_CONFIG_HOME`.
-
 The location of the `jj` user config files/directories can also be overridden with the
 `JJ_CONFIG` environment variable. If it is not empty, it will be used instead
 of any configuration files in the default locations. If it is a path to a TOML
@@ -1641,7 +1911,7 @@ enable schema validation in your editor, add this line at the top of your TOML
 config files:
 
 ```toml
-"$schema" = "https://jj-vcs.github.io/jj/latest/config-schema.json"
+#:schema https://docs.jj-vcs.dev/latest/config-schema.json
 ```
 
 This enables features like:
@@ -1720,6 +1990,12 @@ email = "YOUR_DEFAULT_EMAIL@example.com"
 [--scope.user]
 email = "YOUR_OSS_EMAIL@example.org"
 
+# override ui.pager on specific machines
+[[--scope]]
+--when.hostnames = ["work-laptop", "work-desktop"]
+[--scope.ui]
+pager = "delta"
+
 # disable pagination for `jj status`, use `delta` for `jj diff` and `jj show`
 [[--scope]]
 --when.commands = ["status"]
@@ -1752,7 +2028,7 @@ email = "YOUR_DEFAULT_EMAIL@example.com"
 email = "YOUR_WORK_EMAIL@workplace.com"
 
 [revset-aliases]
-work = "heads(::@ ~ description(exact:''))::"
+work = "heads(::@ ~ description(''))::"
 
 [aliases]
 wip = ["log", "-r", "work"]
@@ -1771,6 +2047,21 @@ wip = ["log", "-r", "work"]
   is in the main workspace if you're using multiple workspaces with `jj
   workspace`.
 
+* `--when.workspaces`: List of paths to match the workspace path prefix.
+
+  The same concerns about the path as for `--when.repositories` applies.
+
+  Use `jj root` to see the workspace root directory.
+
+* `--when.hostnames`: List of hostnames to match against the `operation.hostname`
+  config setting.
+
+  Hostnames are compared case-sensitively and must match exactly.
+
+  ```toml
+  --when.hostnames = ["work-laptop"]               # matches only "work-laptop"
+  --when.hostnames = ["home-desktop", "laptop"]    # matches "home-desktop" OR "laptop"
+  ```
 
 * `--when.commands`: List of subcommands to match.
 
@@ -1780,4 +2071,17 @@ wip = ["log", "-r", "work"]
   --when.commands = ["file"]        # matches `jj file show`, `jj file list`, etc
   --when.commands = ["file show"]   # matches `jj file show` but *NOT* `jj file list`
   --when.commands = ["file", "log"] # matches `jj file` *OR* `jj log` (or subcommand of either)
+  ```
+
+* `--when.platforms`: List of platforms to match.
+
+  The values are defined by both
+  [`std::env::consts::FAMILY`](https://doc.rust-lang.org/std/env/consts/constant.FAMILY.html)
+  and
+  [`std::env::consts::OS`](https://doc.rust-lang.org/std/env/consts/constant.OS.html).
+
+  ```toml
+  --when.platforms = ["windows"]            # matches only Windows
+  --when.platforms = ["linux", "freebsd"]   # matches Linux or and FreeBSD, but not macOS
+  --when.platforms = ["unix"]               # matches anything in the Unix family (Linux, FreeBSD, macOS, etc.)
   ```

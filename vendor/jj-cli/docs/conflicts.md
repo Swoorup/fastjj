@@ -1,6 +1,5 @@
 # First-class conflicts
 
-
 ## Introduction
 
 Conflicts happen when Jujutsu can't figure out how to merge different changes
@@ -17,7 +16,6 @@ rebased, merged, or backed out. Note that what's stored in the commit is a
 logical representation of the conflict, not conflict *markers*; rebasing a
 conflict doesn't result in a nested conflict markers (see
 [technical doc](technical/conflicts.md) for how this works).
-
 
 ## Advantages
 
@@ -53,7 +51,6 @@ The deeper understanding of conflicts has many advantages:
 For information about how conflicts are handled in the working copy, see
 [here](working-copy.md#conflicts).
 
-
 ## Conflict markers
 
 Conflicts are "materialized" using *conflict markers* in various contexts. For
@@ -79,22 +76,26 @@ will materialize the conflict in the working copy using conflict markers, which
 would look like this:
 
 ```text
-<<<<<<< Conflict 1 of 1
-%%%%%%% Changes from base to side #1
+<<<<<<< conflict 1 of 1
+%%%%%%% diff from: vpxusssl 38d49363 "merge base"
+\\\\\\\        to: rtsqusxu 2768b0b9 "commit A"
  apple
 -grape
 +grapefruit
  orange
-+++++++ Contents of side #2
++++++++ ysrnknol 7a20f389 "commit B"
 APPLE
 GRAPE
 ORANGE
->>>>>>> Conflict 1 of 1 ends
+>>>>>>> conflict 1 of 1 ends
 ```
 
 The markers `<<<<<<<` and `>>>>>>>` indicate the start and end of a conflict
 respectively. The marker `+++++++` indicates the start of a snapshot, while the
-marker `%%%%%%%` indicates the start of a diff to apply to the snapshot.
+marker `%%%%%%%` indicates the start of a diff to apply to the snapshot. The
+`\\\\\\\` marker just allows the label to be split across two lines to make it
+more readable.
+
 Therefore, to resolve this conflict, you would apply the diff (changing "grape"
 to "grapefruit") to the snapshot (the side with every line in uppercase),
 editing the file to look like this:
@@ -124,20 +125,20 @@ diff, Jujutsu also supports a "snapshot" style, which can be enabled by setting
 the `ui.conflict-marker-style` config option to "snapshot":
 
 ```text
-<<<<<<< Conflict 1 of 1
-+++++++ Contents of side #1
+<<<<<<< conflict 1 of 1
++++++++ rtsqusxu 2768b0b9 "commit A"
 apple
 grapefruit
 orange
-------- Contents of base
+------- vpxusssl 38d49363 "merge base"
 apple
 grape
 orange
-+++++++ Contents of side #2
++++++++ ysrnknol 7a20f389 "commit B"
 APPLE
 GRAPE
 ORANGE
->>>>>>> Conflict 1 of 1 ends
+>>>>>>> conflict 1 of 1 ends
 ```
 
 Some tools expect Git-style conflict markers, so Jujutsu also supports [Git's
@@ -146,11 +147,11 @@ conflict markers by setting the `ui.conflict-marker-style` config option to
 "git":
 
 ```text
-<<<<<<< Side #1 (Conflict 1 of 1)
+<<<<<<< rtsqusxu 2768b0b9 "commit A"
 apple
 grapefruit
 orange
-||||||| Base
+||||||| vpxusssl 38d49363 "merge base"
 apple
 grape
 orange
@@ -158,7 +159,7 @@ orange
 APPLE
 GRAPE
 ORANGE
->>>>>>> Side #2 (Conflict 1 of 1 ends)
+>>>>>>> ysrnknol 7a20f389 "commit B"
 ```
 
 This conflict marker style only supports 2-sided conflicts though, so it falls
@@ -174,15 +175,16 @@ markers and which are just part of the file contents, `jj` sometimes uses
 conflict markers which are longer than normal:
 
 ```text
-<<<<<<<<<<<<<<< Conflict 1 of 1
-%%%%%%%%%%%%%%% Changes from base to side #1
+<<<<<<<<<<<<<<< conflict 1 of 1
+%%%%%%%%%%%%%%% diff from: wqvuxsty cb9217d5 "merge base"
+\\\\\\\\\\\\\\\        to: kwntsput 0e15b770 "commit A"
 -Heading
 +HEADING
  =======
-+++++++++++++++ Contents of side #2
++++++++++++++++ mpnwrytz 52020ed6 "commit B"
 New Heading
 ===========
->>>>>>>>>>>>>>> Conflict 1 of 1 ends
+>>>>>>>>>>>>>>> conflict 1 of 1 ends
 ```
 
 ## Conflicts with missing terminating newline
@@ -204,13 +206,14 @@ added the missing newline character to make `grape\n`, the resulting conflict
 would look like this:
 
 ```text
-<<<<<<< Conflict 1 of 1
-+++++++ Contents of side #1 (no terminating newline)
+<<<<<<< conflict 1 of 1
++++++++ tlwwkqxk d121763d "commit A" (no terminating newline)
 grapefruit
-%%%%%%% Changes from base to side #2 (adds terminating newline)
+%%%%%%% diff from: qwpqssno fe561d93 "merge base" (no terminating newline)
+\\\\\\\        to: poxkmrxy c735fe02 "commit B"
 -grape
 +grape
->>>>>>> Conflict 1 of 1 ends
+>>>>>>> conflict 1 of 1 ends
 ```
 
 Therefore, a resolution of this conflict could be `grapefruit\n`, with the

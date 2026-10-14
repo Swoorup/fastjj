@@ -15,6 +15,7 @@
 use clap_complete::ArgValueCandidates;
 use clap_complete::ArgValueCompleter;
 use jj_lib::matchers::EverythingMatcher;
+use pollster::FutureExt as _;
 use tracing::instrument;
 
 use crate::cli_util::CommandHelper;
@@ -26,31 +27,37 @@ use crate::ui::Ui;
 
 /// Show commit description and changes in a revision
 #[derive(clap::Args, Clone, Debug)]
+#[command(group(clap::ArgGroup::new("revision")))]
+#[command(mut_arg("ignore_all_space", |a| a.short('w')))]
+#[command(mut_arg("ignore_space_change", |a| a.short('b')))]
 pub(crate) struct ShowArgs {
-    /// Show changes in this revision, compared to its parent(s)
-    #[arg(
-        default_value = "@",
-        value_name = "REVSET",
-        add = ArgValueCompleter::new(complete::revset_expression_all),
-    )]
-    revision: RevisionArg,
-    /// Ignored (but lets you pass `-r` for consistency with other commands)
-    #[arg(short = 'r', hide = true)]
-    unused_revision: bool,
+    /// Show changes in this revision, compared to its parent(s) [default: @]
+    /// [aliases: -r]
+    #[arg(group = "revision", value_name = "REVSET")]
+    #[arg(add = ArgValueCompleter::new(complete::revset_expression_all))]
+    revision_pos: Option<RevisionArg>,
+
+    #[arg(short = 'r', group = "revision", hide = true, value_name = "REVSET")]
+    #[arg(add = ArgValueCompleter::new(complete::revset_expression_all))]
+    revision_opt: Option<RevisionArg>,
+
     /// Render a revision using the given template
     ///
     /// You can specify arbitrary template expressions using the
     /// [built-in keywords]. See [`jj help -k templates`] for more information.
     ///
     /// [built-in keywords]:
-    ///     https://jj-vcs.github.io/jj/latest/templates/#commit-keywords
+    ///     https://docs.jj-vcs.dev/latest/templates/#commit-keywords
     ///
     /// [`jj help -k templates`]:
-    ///     https://jj-vcs.github.io/jj/latest/templates/
-    #[arg(long, short = 'T', add = ArgValueCandidates::new(complete::template_aliases))]
+    ///     https://docs.jj-vcs.dev/latest/templates/
+    #[arg(long, short = 'T')]
+    #[arg(add = ArgValueCandidates::new(complete::template_aliases))]
     template: Option<String>,
+
     #[command(flatten)]
     format: DiffFormatArgs,
+
     /// Do not show the patch
     #[arg(long, conflicts_with = "DiffFormatArgs")]
     no_patch: bool,
@@ -63,19 +70,28 @@ pub(crate) fn cmd_show(
     args: &ShowArgs,
 ) -> Result<(), CommandError> {
     let workspace_command = command.workspace_helper(ui)?;
-    let commit = workspace_command.resolve_single_rev(ui, &args.revision)?;
+    let revision_arg = args
+        .revision_pos
+        .as_ref()
+        .or(args.revision_opt.as_ref())
+        .unwrap_or(&RevisionArg::AT);
+    let commit = workspace_command.resolve_single_rev(ui, revision_arg)?;
     let template_string = match &args.template {
-        Some(value) => value.to_string(),
+        Some(value) => value.clone(),
         None => workspace_command.settings().get_string("templates.show")?,
     };
-    let template = workspace_command.parse_commit_template(ui, &template_string)?;
+    let template = workspace_command
+        .parse_commit_template(ui, &template_string)?
+        .labeled(["show", "commit"]);
     let diff_renderer = workspace_command.diff_renderer_for(&args.format)?;
     ui.request_pager();
     let mut formatter = ui.stdout_formatter();
     let formatter = formatter.as_mut();
     template.format(&commit, formatter)?;
     if !args.no_patch {
-        diff_renderer.show_patch(ui, formatter, &commit, &EverythingMatcher, ui.term_width())?;
+        diff_renderer
+            .show_patch(ui, formatter, &commit, &EverythingMatcher, ui.term_width())
+            .block_on()?;
     }
     Ok(())
 }

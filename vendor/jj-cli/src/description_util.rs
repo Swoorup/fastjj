@@ -22,10 +22,10 @@ use jj_lib::trailer::parse_description_trailers;
 use jj_lib::trailer::parse_trailers;
 use thiserror::Error;
 
-use crate::cli_util::short_commit_hash;
 use crate::cli_util::WorkspaceCommandTransaction;
-use crate::command_error::user_error;
+use crate::cli_util::short_commit_hash;
 use crate::command_error::CommandError;
+use crate::command_error::user_error;
 use crate::config::CommandNameAndArgs;
 use crate::formatter::PlainTextFormatter;
 use crate::templater::TemplateRenderer;
@@ -62,7 +62,7 @@ pub struct TempTextEditError {
 
 impl TempTextEditError {
     fn new(error: Box<dyn std::error::Error + Send + Sync>, path: Option<PathBuf>) -> Self {
-        TempTextEditError {
+        Self {
             error,
             name: None,
             path,
@@ -86,7 +86,7 @@ pub struct TextEditor {
 impl TextEditor {
     pub fn from_settings(settings: &UserSettings) -> Result<Self, ConfigGetError> {
         let editor = settings.get("ui.editor")?;
-        Ok(TextEditor { editor, dir: None })
+        Ok(Self { editor, dir: None })
     }
 
     pub fn with_temp_dir(mut self, dir: impl Into<PathBuf>) -> Self {
@@ -225,7 +225,8 @@ pub fn edit_multiple_descriptions(
         bulk_message.push_str(&commit_hash);
         bulk_message.push_str(" -------\n");
         commits_map.insert(commit_hash, *commit_id);
-        let template = description_template(ui, tx, "", temp_commit)?;
+        let intro = "";
+        let template = description_template(ui, tx, intro, temp_commit)?;
         bulk_message.push_str(&template);
         append_blank_line(&mut bulk_message);
     }
@@ -306,7 +307,7 @@ where
     let missing: Vec<_> = commit_ids_map
         .iter()
         .filter(|(_, commit_id)| !descriptions.contains_key(*commit_id))
-        .map(|(commit_id_prefix, _)| commit_id_prefix.to_string())
+        .map(|(commit_id_prefix, _)| commit_id_prefix.clone())
         .collect();
 
     Ok(ParsedBulkEditMessage {
@@ -341,12 +342,14 @@ pub fn combine_messages_for_editing(
     ui: &Ui,
     tx: &WorkspaceCommandTransaction,
     sources: &[Commit],
-    destination: &Commit,
+    destination: Option<&Commit>,
     commit_builder: &DetachedCommitBuilder,
 ) -> Result<String, CommandError> {
     let mut combined = String::new();
-    combined.push_str("JJ: Description from the destination commit:\n");
-    combined.push_str(destination.description());
+    if let Some(destination) = destination {
+        combined.push_str("JJ: Description from the destination commit:\n");
+        combined.push_str(destination.description());
+    }
     for commit in sources {
         combined.push_str("\nJJ: Description from source commit:\n");
         combined.push_str(commit.description());
@@ -356,15 +359,12 @@ pub fn combine_messages_for_editing(
         // show the user only trailers that were not in one of the squashed commits
         let old_trailers: Vec<_> = sources
             .iter()
-            .chain(std::iter::once(destination))
+            .chain(destination)
             .flat_map(|commit| parse_description_trailers(commit.description()))
             .collect();
         let commit = commit_builder.write_hidden()?;
-        let mut output = Vec::new();
-        template
-            .format(&commit, &mut PlainTextFormatter::new(&mut output))
-            .expect("write() to vec backed formatter should never fail");
-        let trailer_lines = output
+        let trailer_lines = template
+            .format_plain_text(&commit)
             .into_string()
             .map_err(|_| user_error("Trailers should be valid utf-8"))?;
         let new_trailers = parse_trailers(&trailer_lines)?;
@@ -419,11 +419,8 @@ pub fn add_trailers_with_template(
     commit: &Commit,
 ) -> Result<String, CommandError> {
     let trailers = parse_description_trailers(commit.description());
-    let mut output = Vec::new();
-    template
-        .format(commit, &mut PlainTextFormatter::new(&mut output))
-        .expect("write() to vec backed formatter should never fail");
-    let trailer_lines = output
+    let trailer_lines = template
+        .format_plain_text(commit)
         .into_string()
         .map_err(|_| user_error("Trailers should be valid utf-8"))?;
     let new_trailers = parse_trailers(&trailer_lines)?;

@@ -1,0 +1,88 @@
+package redo
+
+import (
+	"errors"
+	"testing"
+
+	tea "charm.land/bubbletea/v2"
+	"github.com/idursun/jjui/internal/jj"
+	"github.com/idursun/jjui/internal/ui/common"
+	"github.com/idursun/jjui/internal/ui/intents"
+	"github.com/idursun/jjui/test"
+	"github.com/stretchr/testify/assert"
+)
+
+func TestConfirm(t *testing.T) {
+	commandRunner := test.NewTestCommandRunner(t)
+	commandRunner.Expect(jj.OpLog(1))
+	commandRunner.Expect(jj.Redo())
+	defer commandRunner.Verify()
+
+	model := NewModel(test.NewTestContext(commandRunner))
+	test.SimulateModel(model, model.Init())
+	assert.Contains(t, test.RenderImmediate(model, 100, 20), "redo")
+
+	test.SimulateModel(model, func() tea.Msg { return intents.Apply{} })
+}
+
+func TestCancel(t *testing.T) {
+	commandRunner := test.NewTestCommandRunner(t)
+	commandRunner.Expect(jj.OpLog(1))
+	defer commandRunner.Verify()
+
+	model := NewModel(test.NewTestContext(commandRunner))
+	test.SimulateModel(model, model.Init())
+	assert.Contains(t, test.RenderImmediate(model, 100, 20), "redo")
+
+	test.SimulateModel(model, func() tea.Msg { return intents.Cancel{} })
+}
+
+func TestOptionSelectMovesSelection(t *testing.T) {
+	commandRunner := test.NewTestCommandRunner(t)
+	commandRunner.Expect(jj.OpLog(1))
+	defer commandRunner.Verify()
+
+	model := NewModel(test.NewTestContext(commandRunner))
+	test.SimulateModel(model, model.Init())
+
+	var msgs []tea.Msg
+	test.SimulateModel(
+		model,
+		tea.Sequence(
+			func() tea.Msg { return intents.OptionSelect{Delta: 1} },
+			func() tea.Msg { return intents.Apply{} },
+		),
+		func(msg tea.Msg) {
+			msgs = append(msgs, msg)
+		},
+	)
+
+	assert.Contains(t, msgs, common.CloseViewMsg{}, "moving to the second option should close without running redo")
+}
+
+func TestRedoNothingToRedo(t *testing.T) {
+	commandRunner := test.NewTestCommandRunner(t)
+	commandRunner.Expect(jj.OpLog(1))
+	commandRunner.Expect(jj.Redo()).SetError(errors.New("error: Nothing to redo"))
+	defer commandRunner.Verify()
+
+	model := NewModel(test.NewTestContext(commandRunner))
+	test.SimulateModel(model, model.Init())
+
+	var msgs []tea.Msg
+	test.SimulateModel(model, func() tea.Msg { return intents.Apply{} }, func(msg tea.Msg) {
+		msgs = append(msgs, msg)
+	})
+
+	var completed *common.CommandCompletedMsg
+	for i := range msgs {
+		if msg, ok := msgs[i].(common.CommandCompletedMsg); ok {
+			completed = &msg
+			break
+		}
+	}
+	assert.NotNil(t, completed, "expected CommandCompletedMsg in %+v", msgs)
+	if assert.NotNil(t, completed.Err) {
+		assert.EqualError(t, completed.Err, "error: Nothing to redo")
+	}
+}

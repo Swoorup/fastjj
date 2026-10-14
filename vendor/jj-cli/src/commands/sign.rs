@@ -18,13 +18,14 @@ use itertools::Itertools as _;
 use jj_lib::commit::Commit;
 use jj_lib::commit::CommitIteratorExt as _;
 use jj_lib::repo::Repo as _;
+use jj_lib::revset::RevsetIteratorExt as _;
 use jj_lib::signing::SignBehavior;
 
-use crate::cli_util::print_updated_commits;
 use crate::cli_util::CommandHelper;
 use crate::cli_util::RevisionArg;
-use crate::command_error::user_error_with_hint;
+use crate::cli_util::print_updated_commits;
 use crate::command_error::CommandError;
+use crate::command_error::user_error_with_hint;
 use crate::complete;
 use crate::ui::Ui;
 
@@ -33,7 +34,7 @@ use crate::ui::Ui;
 /// This command requires configuring a [commit signing] backend.
 ///
 /// [commit signing]:
-///     https://jj-vcs.github.io/jj/latest/config/#commit-signing
+///     https://docs.jj-vcs.dev/latest/config/#commit-signing
 #[derive(clap::Args, Clone, Debug)]
 pub struct SignArgs {
     /// What revision(s) to sign
@@ -49,11 +50,8 @@ pub struct SignArgs {
     ///
     /// [#5786]:
     ///     https://github.com/jj-vcs/jj/issues/5786
-    #[arg(
-        long, short,
-        value_name = "REVSETS",
-        add = ArgValueCompleter::new(complete::revset_expression_mutable),
-    )]
+    #[arg(long, short, value_name = "REVSETS")]
+    #[arg(add = ArgValueCompleter::new(complete::revset_expression_mutable))]
     revisions: Vec<RevisionArg>,
 
     /// The key used for signing
@@ -67,7 +65,7 @@ pub fn cmd_sign(ui: &mut Ui, command: &CommandHelper, args: &SignArgs) -> Result
     if !workspace_command.repo().store().signer().can_sign() {
         return Err(user_error_with_hint(
             "No signing backend configured",
-            "For configuring a signing backend, see https://jj-vcs.github.io/jj/latest/config/#commit-signing",
+            "For configuring a signing backend, see https://docs.jj-vcs.dev/latest/config/#commit-signing",
         ));
     }
 
@@ -76,11 +74,16 @@ pub fn cmd_sign(ui: &mut Ui, command: &CommandHelper, args: &SignArgs) -> Result
         workspace_command.parse_revset(ui, &RevisionArg::from(revset_string))?
     } else {
         workspace_command.parse_union_revsets(ui, &args.revisions)?
-    };
+    }
+    .resolve()?;
 
-    let to_sign: IndexSet<Commit> = revset_expression.evaluate_to_commits()?.try_collect()?;
+    workspace_command.check_rewritable_expr(&revset_expression)?;
 
-    workspace_command.check_rewritable(to_sign.iter().ids())?;
+    let to_sign: IndexSet<Commit> = revset_expression
+        .evaluate(workspace_command.repo().as_ref())?
+        .iter()
+        .commits(workspace_command.repo().store())
+        .try_collect()?;
 
     let mut tx = workspace_command.start_transaction();
 
@@ -89,7 +92,7 @@ pub fn cmd_sign(ui: &mut Ui, command: &CommandHelper, args: &SignArgs) -> Result
 
     tx.repo_mut().transform_descendants(
         to_sign.iter().ids().cloned().collect_vec(),
-        |rewriter| {
+        async |rewriter| {
             let old_commit = rewriter.old_commit().clone();
             let mut commit_builder = rewriter.reparent();
 
@@ -112,15 +115,15 @@ pub fn cmd_sign(ui: &mut Ui, command: &CommandHelper, args: &SignArgs) -> Result
         },
     )?;
 
-    if let Some(mut formatter) = ui.status_formatter() {
-        if !signed_commits.is_empty() {
-            writeln!(formatter, "Signed {} commits:", signed_commits.len())?;
-            print_updated_commits(
-                formatter.as_mut(),
-                &tx.commit_summary_template(),
-                &signed_commits,
-            )?;
-        }
+    if let Some(mut formatter) = ui.status_formatter()
+        && !signed_commits.is_empty()
+    {
+        writeln!(formatter, "Signed {} commits:", signed_commits.len())?;
+        print_updated_commits(
+            formatter.as_mut(),
+            &tx.commit_summary_template(),
+            &signed_commits,
+        )?;
     }
 
     let num_not_authored_by_me = signed_commits

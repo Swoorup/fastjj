@@ -1,8 +1,11 @@
 # Community-built tools around Jujutsu
 
-**Important:** Many of these are not complete yet, just like Jujutsu itself.
-But they already simplify many workflows and can improve your experience.
+Many of these tools are not complete yet, just like Jujutsu itself. But they
+already simplify many workflows and can improve your experience.
 
+!!! warning
+    The listed tools are community‑maintained; the Jujutsu project does not
+    review, endorse, or guarantee their quality or security.
 
 ## Diffedit3
 
@@ -68,20 +71,41 @@ VisualJJ is not open-source.
 
 Find it [here][visualjj].
 
-<!-- TODO: Add benbrittains/cultivate when its ready -->
+## Jujutsu UI
+
+jjui is a terminal user interface for working with Jujutsu version control system.
+
+Find it [here][jjui].
+
+## Selvejj
+
+Selvejj is a JetBrains plugin for integrating Jujutsu as a first-class VCS within the IDE.
+
+Find it [here][selvejj].
+
+## PSCompletions
+
+PSCompletions is a completion manager for a better and simpler tab-completion experience in PowerShell.
+
+It can provide completions via `psc add jj`, or offer a better completion menu for the official completions.
+
+Find it [here][PSCompletions].
+
 ## Finding other integrations
 
 You can find other community contributed tools and integrations in our
 [Wiki].
 
-[cultivate]: https://github.com/benbrittain/cultivate
 [diffedit3]: https://github.com/ilyagr/diffedit3
 [gg]: https://github.com/gulbanana/gg
 [hunk.nvim]: https://github.com/julienvincent/hunk.nvim
 [jj-fzf]: https://github.com/tim-janik/jj-fzf
 [jj_tui]: https://github.com/faldor20/jj_tui
 [jjk]: https://github.com/keanemind/jjk
+[jjui]: https://github.com/idursun/jjui
 [lazyjj]: https://github.com/Cretezy/lazyjj
-[vjj]: https://github.com/noahmayr/vjj
+[PSCompletions]: https://github.com/abgox/PSCompletions
+[selvejj]: https://selvejj.com
 [visualjj]: https://www.visualjj.com
+[vjj]: https://github.com/noahmayr/vjj
 [Wiki]: https://github.com/jj-vcs/jj/wiki

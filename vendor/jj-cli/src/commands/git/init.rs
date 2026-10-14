@@ -16,30 +16,32 @@ use std::io;
 use std::io::Write as _;
 use std::path::Path;
 use std::path::PathBuf;
-use std::str;
 use std::sync::Arc;
 
 use itertools::Itertools as _;
 use jj_lib::file_util;
 use jj_lib::git;
-use jj_lib::git::parse_git_ref;
 use jj_lib::git::GitRefKind;
+use jj_lib::git::GitSettings;
+use jj_lib::git::parse_git_ref;
 use jj_lib::repo::ReadonlyRepo;
 use jj_lib::repo::Repo as _;
 use jj_lib::view::View;
 use jj_lib::workspace::Workspace;
 
 use super::write_repository_level_trunk_alias;
-use crate::cli_util::start_repo_transaction;
 use crate::cli_util::CommandHelper;
 use crate::cli_util::WorkspaceCommandHelper;
+use crate::cli_util::start_repo_transaction;
+use crate::command_error::CommandError;
 use crate::command_error::cli_error;
 use crate::command_error::internal_error;
 use crate::command_error::user_error_with_hint;
 use crate::command_error::user_error_with_message;
-use crate::command_error::CommandError;
 use crate::commands::git::maybe_add_gitignore;
+use crate::formatter::FormatterExt as _;
 use crate::git_util::is_colocated_git_workspace;
+use crate::git_util::load_git_import_options;
 use crate::git_util::print_git_export_stats;
 use crate::git_util::print_git_import_stats;
 use crate::ui::Ui;
@@ -55,17 +57,37 @@ pub struct GitInitArgs {
     #[arg(default_value = ".", value_hint = clap::ValueHint::DirPath)]
     destination: String,
 
-    /// Specifies that the `jj` repo should also be a valid
-    /// `git` repo, allowing the use of both `jj` and `git` commands
-    /// in the same directory.
+    /// Colocate the Jujutsu repo with the git repo
     ///
-    /// This is done by placing the backing git repo into a `.git` directory in
-    /// the root of the `jj` repo along with the `.jj` directory. If the `.git`
-    /// directory already exists, all the existing commits will be imported.
+    /// Specifies that the `jj` repo should also be a valid `git` repo, allowing
+    /// the use of both `jj` and `git` commands in the same directory.
+    ///
+    /// The repository will contain a `.git` dir in the top-level. Regular Git
+    /// tools will be able to operate on the repo.
+    ///
+    /// **This is the default**, and this option has no effect, unless the
+    /// [git.colocate config] is set to `false`.
     ///
     /// This option is mutually exclusive with `--git-repo`.
+    ///
+    /// [git.colocate config]:
+    ///     https://docs.jj-vcs.dev/latest/config/#default-colocation
     #[arg(long, conflicts_with = "git_repo")]
     colocate: bool,
+
+    /// Disable colocation of the Jujutsu repo with the git repo
+    ///
+    /// Prevent Git tools that are unaware of `jj` and regular Git commands from
+    /// operating on the repo. The Git repository that stores most of the repo
+    /// data will be hidden inside a sub-directory of the `.jj` directory.
+    ///
+    /// See [colocation docs] for some minor advantages of non-colocated
+    /// workspaces.
+    ///
+    /// [colocation docs]:
+    ///     https://docs.jj-vcs.dev/latest/git-compatibility/#colocated-jujutsugit-repos
+    #[arg(long, conflicts_with = "colocate")]
+    no_colocate: bool,
 
     /// Specifies a path to an **existing** git repository to be
     /// used as the backing git repo for the newly created `jj` repo.
@@ -73,7 +95,7 @@ pub struct GitInitArgs {
     /// If the specified `--git-repo` path happens to be the same as
     /// the `jj` repo path (both .jj and .git directories are in the
     /// same working directory), then both `jj` and `git` commands
-    /// will work on the same repo. This is called a co-located repo.
+    /// will work on the same repo. This is called a colocated workspace.
     ///
     /// This option is mutually exclusive with `--colocate`.
     #[arg(long, conflicts_with = "colocate", value_hint = clap::ValueHint::DirPath)]
@@ -97,13 +119,13 @@ pub fn cmd_git_init(
         .and_then(|_| dunce::canonicalize(wc_path))
         .map_err(|e| user_error_with_message("Failed to create workspace", e))?;
 
-    do_init(
-        ui,
-        command,
-        &wc_path,
-        args.colocate,
-        args.git_repo.as_deref(),
-    )?;
+    let colocate = if command.settings().get_bool("git.colocate")? {
+        !args.no_colocate
+    } else {
+        args.colocate
+    };
+
+    do_init(ui, command, &wc_path, colocate, args.git_repo.as_deref())?;
 
     let relative_wc_path = file_util::relative_path(cwd, &wc_path);
     writeln!(
@@ -111,6 +133,12 @@ pub fn cmd_git_init(
         r#"Initialized repo in "{}""#,
         relative_wc_path.display()
     )?;
+    if colocate {
+        writeln!(
+            ui.hint_default(),
+            r"Running `git clean -xdf` will remove `.jj/`!",
+        )?;
+    }
 
     Ok(())
 }
@@ -206,18 +234,21 @@ fn init_git_refs(
     string_args: &[String],
     colocated: bool,
 ) -> Result<Arc<ReadonlyRepo>, CommandError> {
-    let mut git_settings = repo.settings().git_settings()?;
+    let git_settings = GitSettings::from_settings(repo.settings())?;
+    let remote_settings = repo.settings().remote_settings()?;
+    let mut import_options = load_git_import_options(ui, &git_settings, &remote_settings)?;
     let mut tx = start_repo_transaction(&repo, string_args);
     // There should be no old refs to abandon, but enforce it.
-    git_settings.abandon_unreachable_commits = false;
-    let stats = git::import_refs(tx.repo_mut(), &git_settings)?;
+    import_options.abandon_unreachable_commits = false;
+    let stats = git::import_refs(tx.repo_mut(), &import_options)?;
     print_git_import_stats(ui, tx.repo(), &stats, false)?;
     if !tx.repo().has_changes() {
         return Ok(repo);
     }
     if colocated {
-        // If git.auto-local-bookmark = true, local bookmarks could be created for
-        // the imported remote branches.
+        // If git.auto-local-bookmark = true or
+        // remotes.<name>.auto-track-bookmarks is set, local bookmarks could be
+        // created for the imported remote branches.
         let stats = git::export_refs(tx.repo_mut())?;
         print_git_export_stats(ui, &stats)?;
     }
@@ -229,27 +260,38 @@ fn init_git_refs(
     Ok(repo)
 }
 
-// Set repository level `trunk()` alias to the default branch for "origin".
+// Set repository level `trunk()` alias to the default branch.
+// Checks "upstream" first, then "origin" as fallback.
 pub fn maybe_set_repository_level_trunk_alias(
     ui: &Ui,
     workspace_command: &WorkspaceCommandHelper,
 ) -> Result<(), CommandError> {
     let git_repo = git::get_git_repo(workspace_command.repo().store())?;
-    if let Some(reference) = git_repo
-        .try_find_reference("refs/remotes/origin/HEAD")
-        .map_err(internal_error)?
-    {
-        if let Some(reference_name) = reference.target().try_name() {
-            if let Some((GitRefKind::Bookmark, symbol)) = str::from_utf8(reference_name.as_bstr())
-                .ok()
-                .and_then(|name| parse_git_ref(name.as_ref()))
+
+    // Try "upstream" first, then fall back to "origin"
+    for remote in ["upstream", "origin"] {
+        let ref_name = format!("refs/remotes/{remote}/HEAD");
+        if let Some(reference) = git_repo
+            .try_find_reference(&ref_name)
+            .map_err(internal_error)?
+        {
+            // Found a HEAD reference for this remote. Even if we can't parse it,
+            // we should stop here and not try other remotes because it doesn't
+            // really make sense if "origin" were to be set as the default if we
+            // know "upstream" exists.
+            if let Some(reference_name) = reference.target().try_name()
+                && let Some((GitRefKind::Bookmark, symbol)) =
+                    str::from_utf8(reference_name.as_bstr())
+                        .ok()
+                        .and_then(|name| parse_git_ref(name.as_ref()))
             {
                 // TODO: Can we assume the symbolic target points to the same remote?
-                let symbol = symbol.name.to_remote_symbol("origin".as_ref());
+                let symbol = symbol.name.to_remote_symbol(remote.as_ref());
                 write_repository_level_trunk_alias(ui, workspace_command.repo_path(), symbol)?;
             }
-        };
-    };
+            return Ok(());
+        }
+    }
 
     Ok(())
 }
@@ -281,9 +323,16 @@ fn print_trackable_remote_bookmarks(ui: &Ui, view: &View) -> io::Result<()> {
         }
         writeln!(
             formatter.labeled("hint").with_heading("Hint: "),
-            "Run `jj bookmark track {syms}` to keep local bookmarks updated on future pulls.",
-            syms = remote_bookmark_symbols.iter().join(" "),
+            "Run the following command to keep local bookmarks updated on future pulls:"
         )?;
+        for symbol in &remote_bookmark_symbols {
+            writeln!(
+                formatter.labeled("hint"),
+                "  jj bookmark track {name} --remote={remote}",
+                name = symbol.name.as_symbol(),
+                remote = symbol.remote.as_symbol()
+            )?;
+        }
     }
     Ok(())
 }

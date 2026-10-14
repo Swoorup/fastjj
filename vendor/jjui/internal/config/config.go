@@ -1,0 +1,389 @@
+package config
+
+import (
+	"context"
+	"embed"
+	"fmt"
+	"github.com/idursun/jjui/internal/privateclient"
+	"log"
+	"os"
+	"os/exec"
+	"path"
+	"strings"
+	"time"
+)
+
+//go:embed default/*.toml default/types.lua
+var configFS embed.FS
+
+var Current = loadDefaultConfig()
+
+type Config struct {
+	BindingsProfile string          `toml:"bindings_profile"`
+	Actions         []ActionConfig  `toml:"actions"`
+	Bindings        []BindingConfig `toml:"bindings"`
+	UI              UIConfig        `toml:"ui"`
+	Suggest         SuggestConfig   `toml:"suggest"`
+	Revisions       RevisionsConfig `toml:"revisions"`
+	Preview         PreviewConfig   `toml:"preview"`
+	OpLog           OpLogConfig     `toml:"oplog"`
+	Limit           int             `toml:"limit"`
+	Git             GitConfig       `toml:"git"`
+	Askpass         AskpassConfig   `toml:"askpass"`
+	Bookmark        BookmarkConfig  `toml:"bookmark"`
+}
+
+type Color struct {
+	Fg            string `toml:"fg"`
+	Bg            string `toml:"bg"`
+	Bold          *bool  `toml:"bold"`
+	Italic        *bool  `toml:"italic"`
+	Underline     *bool  `toml:"underline"`
+	Strikethrough *bool  `toml:"strikethrough"`
+	Reverse       *bool  `toml:"reverse"`
+}
+
+func (c *Color) UnmarshalTOML(text any) error {
+	switch v := text.(type) {
+	case string:
+		c.Fg = v
+	case map[string]any:
+		if p, ok := v["fg"]; ok {
+			c.Fg = p.(string)
+		}
+		if p, ok := v["bg"]; ok {
+			c.Bg = p.(string)
+		}
+		if p, ok := v["bold"]; ok {
+			b := p.(bool)
+			c.Bold = &b
+		}
+		if p, ok := v["italic"]; ok {
+			b := p.(bool)
+			c.Italic = &b
+		}
+		if p, ok := v["underline"]; ok {
+			b := p.(bool)
+			c.Underline = &b
+		}
+		if p, ok := v["strikethrough"]; ok {
+			b := p.(bool)
+			c.Strikethrough = &b
+		}
+		if p, ok := v["reverse"]; ok {
+			b := p.(bool)
+			c.Reverse = &b
+		}
+	}
+	return nil
+}
+
+type ThemeConfig struct {
+	Dark  string `toml:"dark"`
+	Light string `toml:"light"`
+}
+
+type Theme struct {
+	Colors map[string]Color `toml:"colors"`
+	Light  ThemeVariant     `toml:"light"`
+	Dark   ThemeVariant     `toml:"dark"`
+}
+
+type ThemeVariant struct {
+	BackgroundBlend *float64         `toml:"background_blend"`
+	Colors          map[string]Color `toml:"colors"`
+}
+
+type ResolvedTheme struct {
+	Colors          map[string]Color
+	BackgroundBlend float64
+}
+
+type BackgroundBlendConfig struct {
+	Value *float64
+	Light *float64
+	Dark  *float64
+}
+
+// UnmarshalTOML accepts either a single value for both appearance modes or a
+// table containing independent light and dark values.
+func (c *BackgroundBlendConfig) UnmarshalTOML(data any) error {
+	switch value := data.(type) {
+	case float64:
+		c.Value = &value
+		c.Light = nil
+		c.Dark = nil
+	case int64:
+		converted := float64(value)
+		c.Value = &converted
+		c.Light = nil
+		c.Dark = nil
+	case map[string]any:
+		if light, ok := value["light"]; ok {
+			parsed, err := backgroundBlendValue("light", light)
+			if err != nil {
+				return err
+			}
+			c.Light = &parsed
+		}
+		if dark, ok := value["dark"]; ok {
+			parsed, err := backgroundBlendValue("dark", dark)
+			if err != nil {
+				return err
+			}
+			c.Dark = &parsed
+		}
+	default:
+		return fmt.Errorf("invalid type for 'background_blend': expected number or table, got %T", data)
+	}
+	return nil
+}
+
+func backgroundBlendValue(mode string, value any) (float64, error) {
+	switch value := value.(type) {
+	case float64:
+		return value, nil
+	case int64:
+		return float64(value), nil
+	default:
+		return 0, fmt.Errorf("invalid type for '%s' in background_blend configuration: expected number, got %T", mode, value)
+	}
+}
+
+func (c BackgroundBlendConfig) Resolve(isDark bool) *float64 {
+	if isDark && c.Dark != nil {
+		return c.Dark
+	}
+	if !isDark && c.Light != nil {
+		return c.Light
+	}
+	return c.Value
+}
+
+func (t *ThemeConfig) UnmarshalTOML(data any) error {
+	switch v := data.(type) {
+	case string:
+		t.Dark = v
+		t.Light = v
+	case map[string]any:
+		if dark, ok := v["dark"]; ok {
+			if darkStr, isString := dark.(string); isString {
+				t.Dark = darkStr
+			} else {
+				return fmt.Errorf("invalid type for 'dark' in theme configuration: expected string, got %T", dark)
+			}
+		}
+		if light, ok := v["light"]; ok {
+			if lightStr, isString := light.(string); isString {
+				t.Light = lightStr
+			} else {
+				return fmt.Errorf("invalid type for 'light' in theme configuration: expected string, got %T", light)
+			}
+		}
+	}
+	return nil
+}
+
+type UIConfig struct {
+	Theme           ThemeConfig           `toml:"theme"`
+	Colors          map[string]Color      `toml:"colors"`
+	BackgroundBlend BackgroundBlendConfig `toml:"background_blend"`
+	SetWindowTitle  WindowTitleMode       `toml:"set_window_title"`
+	// TODO(ilyagr): It might make sense to rename this to `auto_refresh_period` to match `--period` option
+	// once we have a mechanism to deprecate the old name softly.
+	AutoRefreshInterval        int  `toml:"auto_refresh_interval"`
+	FlashMessageDisplaySeconds int  `toml:"flash_message_display_seconds"`
+	MouseSupport               bool `toml:"mouse_support"`
+}
+
+func GetExpiringFlashMessageTimeout(c *Config) time.Duration {
+	return time.Duration(c.UI.FlashMessageDisplaySeconds) * time.Second
+}
+
+// WindowTitleMode controls the terminal window title. It accepts a boolean
+// (true shows the full repo path, false disables the title) or the string
+// "base" to show only the directory name.
+type WindowTitleMode int
+
+const (
+	WindowTitleOff WindowTitleMode = iota
+	WindowTitleFull
+	WindowTitleBase
+)
+
+func (m *WindowTitleMode) UnmarshalTOML(data any) error {
+	switch value := data.(type) {
+	case bool:
+		if value {
+			*m = WindowTitleFull
+		} else {
+			*m = WindowTitleOff
+		}
+	case string:
+		switch value {
+		case "base":
+			*m = WindowTitleBase
+		case "full":
+			*m = WindowTitleFull
+		default:
+			return fmt.Errorf("invalid value for 'set_window_title': %q (expected one of: true, false, 'base', 'full')", value)
+		}
+	default:
+		return fmt.Errorf("invalid type for 'set_window_title': expected boolean or string, got %T", data)
+	}
+	return nil
+}
+
+type RevisionsConfig struct {
+	LogBatching  bool   `toml:"log_batching"`
+	LogBatchSize int    `toml:"log_batch_size"`
+	Template     string `toml:"template"`
+	Revset       string `toml:"revset"`
+}
+
+type PreviewPosition int
+
+const (
+	PreviewPositionAuto PreviewPosition = iota
+	PreviewPositionBottom
+	PreviewPositionRight
+)
+
+type PreviewConfig struct {
+	RevisionCommand          []string `toml:"revision_command"`
+	EvologCommand            []string `toml:"evolog_command"`
+	OplogCommand             []string `toml:"oplog_command"`
+	FileCommand              []string `toml:"file_command"`
+	ShowAtStart              bool     `toml:"show_at_start"`
+	Position                 string   `toml:"position"`
+	WidthPercentage          float64  `toml:"width_percentage"`
+	WidthIncrementPercentage float64  `toml:"width_increment_percentage"`
+}
+
+func GetPreviewPosition(c *Config) (PreviewPosition, error) {
+	switch value := c.Preview.Position; value {
+	case "auto":
+		return PreviewPositionAuto, nil
+	case "bottom":
+		return PreviewPositionBottom, nil
+	case "right":
+		return PreviewPositionRight, nil
+	default:
+		return PreviewPositionAuto, fmt.Errorf("invalid value for 'preview.position': %q (expected one of: auto, bottom, right)", value)
+	}
+}
+
+type OpLogConfig struct {
+	Limit int `toml:"limit"`
+}
+
+func GetDefaultEditor() string {
+	editor := os.Getenv("EDITOR")
+	if editor == "" {
+		editor = os.Getenv("VISUAL")
+	}
+
+	// Fallback to common editors if not set
+	if editor == "" {
+		candidates := []string{"nano", "vim", "vi", "notepad.exe"} // Windows fallback
+		for _, candidate := range candidates {
+			if p, err := exec.LookPath(candidate); err == nil {
+				editor = p
+				break
+			}
+		}
+	}
+
+	return editor
+}
+
+func Edit() int {
+	configFile := getConfigFilePath()
+	_, err := os.Stat(configFile)
+	if os.IsNotExist(err) {
+		configPath := path.Dir(configFile)
+		if _, err := os.Stat(configPath); os.IsNotExist(err) {
+			err = os.MkdirAll(configPath, 0o755)
+			if err != nil {
+				log.Fatal(err)
+				return -1
+			}
+		}
+		if _, err := os.Stat(configFile); os.IsNotExist(err) {
+			_, err := os.Create(configFile)
+			if err != nil {
+				log.Fatal(err)
+				return -1
+			}
+		}
+	}
+
+	cmd, cleanup, err := privateclient.Command(context.Background(), []string{"--edit-file", configFile}, "", true)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		return 1
+	}
+	defer cleanup()
+
+	cmd.Stdin = os.Stdin
+	cmd.Stdout = os.Stdout
+	cmd.Stderr = os.Stderr
+	if err := cmd.Run(); err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		return 1
+	}
+	return 0
+}
+
+type SuggestMode int
+
+const (
+	SuggestModeOff SuggestMode = iota
+	SuggestModeFuzzy
+	SuggestModeRegex
+)
+
+type SuggestConfig struct {
+	Exec SuggestExecConfig `toml:"exec"`
+}
+
+type SuggestExecConfig struct {
+	Mode string `toml:"mode"`
+}
+
+func GetSuggestExecMode(c *Config) (SuggestMode, error) {
+	switch value := c.Suggest.Exec.Mode; value {
+	case "off":
+		return SuggestModeOff, nil
+	case "fuzzy":
+		return SuggestModeFuzzy, nil
+	case "regex":
+		return SuggestModeRegex, nil
+	default:
+		return SuggestModeOff, fmt.Errorf("invalid value for 'suggest.exec.mode': %q (expected one of: off, fuzzy, regex)", value)
+	}
+}
+
+type GitConfig struct {
+	DefaultRemote string `toml:"default_remote"`
+}
+
+type AskpassConfig struct {
+	Enabled bool `toml:"enabled"`
+}
+
+func GetGitDefaultRemote(c *Config) string {
+	remote := c.Git.DefaultRemote
+	if strings.TrimSpace(remote) == "" {
+		return "origin"
+	}
+	return remote
+}
+
+func (c *Config) AskpassEnabled() bool {
+	return c.Askpass.Enabled
+}
+
+type BookmarkConfig struct {
+	InteractiveBookmarkPane bool `toml:"interactive_bookmark_pane"`
+}

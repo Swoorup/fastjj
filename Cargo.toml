@@ -1,6 +1,6 @@
 [package]
 name = "fastjj"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2024"
 rust-version = "1.89"
 description = "A process-private Jujutsu client with in-process Git transport"
@@ -11,7 +11,8 @@ repository = "https://github.com/Swoorup/fastjj"
 base64 = "0.22"
 git2 = { version = "0.20.4", features = ["vendored-libgit2", "vendored-openssl"] }
 glob = "0.3"
-jj-cli = { version = "=0.29.0", default-features = false, features = ["git2", "vendored-openssl"] }
+jj-cli = { version = "=0.37.0", default-features = false, features = ["git"] }
+jj-lib = { version = "=0.37.0", default-features = false, features = ["git"] }
 libc = "0.2"
 percent-encoding = "2"
 rpassword = "7"
@@ -39,6 +40,7 @@ strip = "debuginfo"
 
 [patch.crates-io]
 jj-cli = { path = "vendor/jj-cli" }
+jj-lib = { path = "vendor/jj-lib" }
 
 [target.'cfg(target_os = "macos")'.dependencies]
 security-framework = "3"

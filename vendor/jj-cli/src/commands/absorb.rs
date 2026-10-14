@@ -13,16 +13,17 @@
 // limitations under the License.
 
 use clap_complete::ArgValueCompleter;
+use jj_lib::absorb::AbsorbSource;
 use jj_lib::absorb::absorb_hunks;
 use jj_lib::absorb::split_hunks_to_trees;
-use jj_lib::absorb::AbsorbSource;
 use jj_lib::matchers::EverythingMatcher;
 use pollster::FutureExt as _;
 use tracing::instrument;
 
-use crate::cli_util::print_updated_commits;
 use crate::cli_util::CommandHelper;
 use crate::cli_util::RevisionArg;
+use crate::cli_util::print_unmatched_explicit_paths;
+use crate::cli_util::print_updated_commits;
 use crate::command_error::CommandError;
 use crate::complete;
 use crate::diff_util::DiffFormat;
@@ -42,25 +43,26 @@ use crate::ui::Ui;
 #[derive(clap::Args, Clone, Debug)]
 pub(crate) struct AbsorbArgs {
     /// Source revision to absorb from
-    #[arg(
-        long, short,
-        default_value = "@",
-        value_name = "REVSET",
-        add = ArgValueCompleter::new(complete::revset_expression_mutable),
-    )]
+    #[arg(long, short, default_value = "@", value_name = "REVSET")]
+    #[arg(add = ArgValueCompleter::new(complete::revset_expression_mutable))]
     from: RevisionArg,
+
     /// Destination revisions to absorb into
     ///
     /// Only ancestors of the source revision will be considered.
     #[arg(
-        long, short = 't', visible_alias = "to",
+        long,
+        short = 't',
+        visible_alias = "to",
         default_value = "mutable()",
-        value_name = "REVSETS",
-        add = ArgValueCompleter::new(complete::revset_expression_mutable),
+        value_name = "REVSETS"
     )]
+    #[arg(add = ArgValueCompleter::new(complete::revset_expression_mutable))]
     into: Vec<RevisionArg>,
+
     /// Move only changes to these paths (instead of all paths)
     #[arg(value_name = "FILESETS", value_hint = clap::ValueHint::AnyPath)]
+    #[arg(add = ArgValueCompleter::new(complete::modified_from_files))]
     paths: Vec<String>,
 }
 
@@ -77,13 +79,19 @@ pub(crate) fn cmd_absorb(
         .parse_union_revsets(ui, &args.into)?
         .resolve()?;
 
-    let matcher = workspace_command
-        .parse_file_patterns(ui, &args.paths)?
-        .to_matcher();
+    let fileset_expression = workspace_command.parse_file_patterns(ui, &args.paths)?;
+    let matcher = fileset_expression.to_matcher();
 
     let repo = workspace_command.repo().as_ref();
-    let source = AbsorbSource::from_commit(repo, source_commit)?;
+    let source = AbsorbSource::from_commit(repo, source_commit.clone())?;
     let selected_trees = split_hunks_to_trees(repo, &source, &destinations, &matcher).block_on()?;
+
+    print_unmatched_explicit_paths(
+        ui,
+        &workspace_command,
+        &fileset_expression,
+        [&source_commit.tree()],
+    )?;
 
     let path_converter = workspace_command.path_converter();
     for (path, reason) in selected_trees.skipped_paths {
@@ -126,16 +134,18 @@ pub(crate) fn cmd_absorb(
         ),
     )?;
 
-    if let Some(mut formatter) = ui.status_formatter() {
-        if let Some(commit) = &stats.rewritten_source {
-            let repo = workspace_command.repo().as_ref();
-            if !commit.is_empty(repo)? {
-                writeln!(formatter, "Remaining changes:")?;
-                let diff_renderer = workspace_command.diff_renderer(vec![DiffFormat::Summary]);
-                let matcher = &EverythingMatcher; // also print excluded paths
-                let width = ui.term_width();
-                diff_renderer.show_patch(ui, formatter.as_mut(), commit, matcher, width)?;
-            }
+    if let Some(mut formatter) = ui.status_formatter()
+        && let Some(commit) = &stats.rewritten_source
+    {
+        let repo = workspace_command.repo().as_ref();
+        if !commit.is_empty(repo)? {
+            writeln!(formatter, "Remaining changes:")?;
+            let diff_renderer = workspace_command.diff_renderer(vec![DiffFormat::Summary]);
+            let matcher = &EverythingMatcher; // also print excluded paths
+            let width = ui.term_width();
+            diff_renderer
+                .show_patch(ui, formatter.as_mut(), commit, matcher, width)
+                .block_on()?;
         }
     }
     Ok(())

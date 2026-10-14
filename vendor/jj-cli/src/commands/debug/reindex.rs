@@ -15,13 +15,13 @@
 use std::fmt::Debug;
 use std::io::Write as _;
 
-use jj_lib::default_index::AsCompositeIndex as _;
 use jj_lib::default_index::DefaultIndexStore;
+use pollster::FutureExt as _;
 
 use crate::cli_util::CommandHelper;
+use crate::command_error::CommandError;
 use crate::command_error::internal_error;
 use crate::command_error::user_error;
-use crate::command_error::CommandError;
 use crate::ui::Ui;
 
 /// Rebuild commit index
@@ -39,15 +39,16 @@ pub fn cmd_debug_reindex(
     let repo_loader = workspace.repo_loader();
     let op = command.resolve_operation(ui, repo_loader)?;
     let index_store = repo_loader.index_store();
-    if let Some(default_index_store) = index_store.as_any().downcast_ref::<DefaultIndexStore>() {
+    if let Some(default_index_store) = index_store.downcast_ref::<DefaultIndexStore>() {
         default_index_store.reinit().map_err(internal_error)?;
         let default_index = default_index_store
             .build_index_at_operation(&op, repo_loader.store())
+            .block_on()
             .map_err(internal_error)?;
         writeln!(
             ui.status(),
-            "Finished indexing {:?} commits.",
-            default_index.as_composite().stats().num_commits
+            "Finished indexing {} commits.",
+            default_index.num_commits()
         )?;
     } else {
         return Err(user_error(format!(

@@ -1,0 +1,7 @@
+version: '3'
+
+tasks:
+  test:
+    desc: Run the E2E suite, or one test when given a test name
+    cmds:
+      - docker compose run --rm --build {{if .CLI_ARGS}}-e E2E_TEST={{.CLI_ARGS}}{{end}} test

@@ -17,11 +17,13 @@ use indexmap::IndexSet;
 use itertools::Itertools as _;
 use jj_lib::commit::Commit;
 use jj_lib::commit::CommitIteratorExt as _;
+use jj_lib::repo::Repo as _;
+use jj_lib::revset::RevsetIteratorExt as _;
 use jj_lib::signing::SignBehavior;
 
-use crate::cli_util::print_updated_commits;
 use crate::cli_util::CommandHelper;
 use crate::cli_util::RevisionArg;
+use crate::cli_util::print_updated_commits;
 use crate::command_error::CommandError;
 use crate::complete;
 use crate::ui::Ui;
@@ -31,15 +33,12 @@ use crate::ui::Ui;
 /// See also [commit signing] docs.
 ///
 /// [commit signing]:
-///     https://jj-vcs.github.io/jj/latest/config/#commit-signing
+///     https://docs.jj-vcs.dev/latest/config/#commit-signing
 #[derive(clap::Args, Clone, Debug)]
 pub struct UnsignArgs {
     /// What revision(s) to unsign
-    #[arg(
-        long, short,
-        value_name = "REVSETS",
-        add = ArgValueCompleter::new(complete::revset_expression_mutable),
-    )]
+    #[arg(long, short, value_name = "REVSETS")]
+    #[arg(add = ArgValueCompleter::new(complete::revset_expression_mutable))]
     revisions: Vec<RevisionArg>,
 }
 
@@ -50,12 +49,15 @@ pub fn cmd_unsign(
 ) -> Result<(), CommandError> {
     let mut workspace_command = command.workspace_helper(ui)?;
 
-    let commits: IndexSet<Commit> = workspace_command
+    let target_expr = workspace_command
         .parse_union_revsets(ui, &args.revisions)?
-        .evaluate_to_commits()?
+        .resolve()?;
+    workspace_command.check_rewritable_expr(&target_expr)?;
+    let commits: IndexSet<Commit> = target_expr
+        .evaluate(workspace_command.repo().as_ref())?
+        .iter()
+        .commits(workspace_command.repo().store())
         .try_collect()?;
-
-    workspace_command.check_rewritable(commits.iter().ids())?;
 
     let to_unsign: IndexSet<Commit> = commits
         .into_iter()
@@ -69,7 +71,7 @@ pub fn cmd_unsign(
 
     tx.repo_mut().transform_descendants(
         to_unsign.iter().ids().cloned().collect_vec(),
-        |rewriter| {
+        async |rewriter| {
             let old_commit = rewriter.old_commit().clone();
             let commit_builder = rewriter.reparent();
 
@@ -87,15 +89,15 @@ pub fn cmd_unsign(
         },
     )?;
 
-    if let Some(mut formatter) = ui.status_formatter() {
-        if !unsigned_commits.is_empty() {
-            writeln!(formatter, "Unsigned {} commits:", unsigned_commits.len())?;
-            print_updated_commits(
-                formatter.as_mut(),
-                &tx.commit_summary_template(),
-                &unsigned_commits,
-            )?;
-        }
+    if let Some(mut formatter) = ui.status_formatter()
+        && !unsigned_commits.is_empty()
+    {
+        writeln!(formatter, "Unsigned {} commits:", unsigned_commits.len())?;
+        print_updated_commits(
+            formatter.as_mut(),
+            &tx.commit_summary_template(),
+            &unsigned_commits,
+        )?;
     }
 
     let num_not_authored_by_me = unsigned_commits

@@ -22,13 +22,12 @@ use super::ConfigLevelArgs;
 use crate::cli_util::CommandHelper;
 use crate::command_error::CommandError;
 use crate::complete;
-use crate::config::resolved_config_values;
 use crate::config::AnnotatedValue;
+use crate::config::resolved_config_values;
+use crate::generic_templater;
 use crate::generic_templater::GenericTemplateLanguage;
-use crate::generic_templater::GenericTemplatePropertyKind;
-use crate::template_builder::CoreTemplatePropertyVar as _;
-use crate::template_builder::TemplateLanguage;
 use crate::templater::TemplatePropertyExt as _;
+use crate::templater::TemplateRenderer;
 use crate::ui::Ui;
 
 /// List variables set in config files, along with their values.
@@ -38,19 +37,23 @@ pub struct ConfigListArgs {
     /// An optional name of a specific config option to look up.
     #[arg(add = ArgValueCandidates::new(complete::config_keys))]
     pub name: Option<ConfigNamePathBuf>,
+
     /// Whether to explicitly include built-in default values in the list.
     #[arg(long, conflicts_with = "config_level")]
     pub include_defaults: bool,
+
     /// Allow printing overridden values.
     #[arg(long)]
     pub include_overridden: bool,
+
     #[command(flatten)]
     pub level: ConfigLevelArgs,
+
     /// Render each variable using the given template
     ///
     /// The following keywords are available in the template expression:
     ///
-    /// * `name: String`: Config name.
+    /// * `name: String`: Config name, in [TOML's "dotted key" format].
     /// * `value: ConfigValue`: Value to be formatted in TOML syntax.
     /// * `overridden: Boolean`: True if the value is shadowed by other.
     /// * `source: String`: Source of the value.
@@ -62,13 +65,12 @@ pub struct ConfigListArgs {
     ///
     /// See [`jj help -k templates`] for more information.
     ///
+    /// [TOML's "dotted key" format]: https://toml.io/en/v1.0.0#keys
+    ///
     /// [`jj help -k templates`]:
-    ///     https://jj-vcs.github.io/jj/latest/templates/
-    #[arg(
-        long, short = 'T',
-        verbatim_doc_comment,
-        add = ArgValueCandidates::new(complete::template_aliases)
-    )]
+    ///     https://docs.jj-vcs.dev/latest/templates/
+    #[arg(long, short = 'T', verbatim_doc_comment)]
+    #[arg(add = ArgValueCandidates::new(complete::template_aliases))]
     template: Option<String>,
 }
 
@@ -78,15 +80,15 @@ pub fn cmd_config_list(
     command: &CommandHelper,
     args: &ConfigListArgs,
 ) -> Result<(), CommandError> {
-    let template = {
+    let template: TemplateRenderer<AnnotatedValue> = {
         let language = config_template_language(command.settings());
         let text = match &args.template {
             Some(value) => value.to_owned(),
             None => command.settings().get_string("templates.config_list")?,
         };
         command
-            .parse_template(ui, &language, &text, GenericTemplatePropertyKind::wrap_self)?
-            .labeled("config_list")
+            .parse_template(ui, &language, &text)?
+            .labeled(["config_list"])
     };
 
     let name_path = args.name.clone().unwrap_or_else(ConfigNamePathBuf::root);
@@ -122,23 +124,24 @@ pub fn cmd_config_list(
 
 type ConfigTemplateLanguage = GenericTemplateLanguage<'static, AnnotatedValue>;
 
+generic_templater::impl_self_property_wrapper!(AnnotatedValue);
+
 // AnnotatedValue will be cloned internally in the templater. If the cloning
 // cost matters, wrap it with Rc.
 fn config_template_language(settings: &UserSettings) -> ConfigTemplateLanguage {
-    type P = <ConfigTemplateLanguage as TemplateLanguage<'static>>::Property;
     let mut language = ConfigTemplateLanguage::new(settings);
     language.add_keyword("name", |self_property| {
         let out_property = self_property.map(|annotated| annotated.name.to_string());
-        Ok(P::wrap_string(out_property.into_dyn()))
+        Ok(out_property.into_dyn_wrapped())
     });
     language.add_keyword("value", |self_property| {
         // .decorated("", "") to trim leading/trailing whitespace
         let out_property = self_property.map(|annotated| annotated.value.decorated("", ""));
-        Ok(P::wrap_config_value(out_property.into_dyn()))
+        Ok(out_property.into_dyn_wrapped())
     });
     language.add_keyword("source", |self_property| {
         let out_property = self_property.map(|annotated| annotated.source.to_string());
-        Ok(P::wrap_string(out_property.into_dyn()))
+        Ok(out_property.into_dyn_wrapped())
     });
     language.add_keyword("path", |self_property| {
         let out_property = self_property.map(|annotated| {
@@ -148,11 +151,11 @@ fn config_template_language(settings: &UserSettings) -> ConfigTemplateLanguage {
                 .as_ref()
                 .map_or_else(String::new, |path| path.to_string_lossy().into_owned())
         });
-        Ok(P::wrap_string(out_property.into_dyn()))
+        Ok(out_property.into_dyn_wrapped())
     });
     language.add_keyword("overridden", |self_property| {
         let out_property = self_property.map(|annotated| annotated.is_overridden);
-        Ok(P::wrap_boolean(out_property.into_dyn()))
+        Ok(out_property.into_dyn_wrapped())
     });
     language
 }

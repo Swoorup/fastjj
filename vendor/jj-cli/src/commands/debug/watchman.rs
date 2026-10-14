@@ -13,9 +13,6 @@
 // limitations under the License.
 
 #[cfg(feature = "watchman")]
-use std::any::Any;
-use std::fmt::Debug;
-#[cfg(feature = "watchman")]
 use std::io::Write as _;
 
 use clap::Subcommand;
@@ -25,10 +22,14 @@ use jj_lib::fsmonitor::FsmonitorSettings;
 use jj_lib::fsmonitor::WatchmanConfig;
 #[cfg(feature = "watchman")]
 use jj_lib::local_working_copy::LocalWorkingCopy;
+#[cfg(feature = "watchman")]
+use jj_lib::working_copy::WorkingCopy;
+#[cfg(feature = "watchman")]
+use pollster::FutureExt as _;
 
 use crate::cli_util::CommandHelper;
-use crate::command_error::user_error;
 use crate::command_error::CommandError;
+use crate::command_error::user_error;
 use crate::ui::Ui;
 
 #[derive(Subcommand, Clone, Debug)]
@@ -57,12 +58,13 @@ pub fn cmd_debug_watchman(
     match subcommand {
         DebugWatchmanCommand::Status => {
             // TODO(ilyagr): It would be nice to add colors here
-            let config = match workspace_command.settings().fsmonitor_settings()? {
+            let config = match FsmonitorSettings::from_settings(workspace_command.settings())? {
                 FsmonitorSettings::Watchman(config) => {
-                    writeln!(ui.stdout(), "Watchman is enabled via `core.fsmonitor`.")?;
+                    writeln!(ui.stdout(), "Watchman is enabled via `fsmonitor.backend`.")?;
                     writeln!(
                         ui.stdout(),
-                        r"Background snapshotting is {}. Use `core.watchman.register-snapshot-trigger` to control it.",
+                        "Background snapshotting is {}. Use \
+                         `fsmonitor.watchman.register-snapshot-trigger` to control it.",
                         if config.register_trigger {
                             "enabled"
                         } else {
@@ -74,7 +76,7 @@ pub fn cmd_debug_watchman(
                 FsmonitorSettings::None => {
                     writeln!(
                         ui.stdout(),
-                        r#"Watchman is disabled. Set `core.fsmonitor="watchman"` to enable."#
+                        r#"Watchman is disabled. Set `fsmonitor.backend="watchman"` to enable."#
                     )?;
                     writeln!(
                         ui.stdout(),
@@ -85,11 +87,11 @@ pub fn cmd_debug_watchman(
                 other_fsmonitor => {
                     return Err(user_error(format!(
                         r"This command does not support the currently enabled filesystem monitor: {other_fsmonitor:?}."
-                    )))
+                    )));
                 }
             };
-            let wc = check_local_disk_wc(workspace_command.working_copy().as_any())?;
-            let _ = wc.query_watchman(&config)?;
+            let wc = check_local_disk_wc(workspace_command.working_copy())?;
+            wc.query_watchman(&config).block_on()?;
             writeln!(
                 ui.stdout(),
                 "The watchman server seems to be installed and working correctly."
@@ -97,7 +99,7 @@ pub fn cmd_debug_watchman(
             writeln!(
                 ui.stdout(),
                 "Background snapshotting is currently {}.",
-                if wc.is_watchman_trigger_registered(&config)? {
+                if wc.is_watchman_trigger_registered(&config).block_on()? {
                     "active"
                 } else {
                     "inactive"
@@ -105,19 +107,19 @@ pub fn cmd_debug_watchman(
             )?;
         }
         DebugWatchmanCommand::QueryClock => {
-            let wc = check_local_disk_wc(workspace_command.working_copy().as_any())?;
-            let (clock, _changed_files) = wc.query_watchman(&watchman_config)?;
+            let wc = check_local_disk_wc(workspace_command.working_copy())?;
+            let (clock, _changed_files) = wc.query_watchman(&watchman_config).block_on()?;
             writeln!(ui.stdout(), "Clock: {clock:?}")?;
         }
         DebugWatchmanCommand::QueryChangedFiles => {
-            let wc = check_local_disk_wc(workspace_command.working_copy().as_any())?;
-            let (_clock, changed_files) = wc.query_watchman(&watchman_config)?;
+            let wc = check_local_disk_wc(workspace_command.working_copy())?;
+            let (_clock, changed_files) = wc.query_watchman(&watchman_config).block_on()?;
             writeln!(ui.stdout(), "Changed files: {changed_files:?}")?;
         }
         DebugWatchmanCommand::ResetClock => {
             let (mut locked_ws, _commit) = workspace_command.start_working_copy_mutation()?;
             let Some(locked_local_wc): Option<&mut LockedLocalWorkingCopy> =
-                locked_ws.locked_wc().as_any_mut().downcast_mut()
+                locked_ws.locked_wc().downcast_mut()
             else {
                 return Err(user_error(
                     "This command requires a standard local-disk working copy",
@@ -143,7 +145,7 @@ pub fn cmd_debug_watchman(
 }
 
 #[cfg(feature = "watchman")]
-fn check_local_disk_wc(x: &dyn Any) -> Result<&LocalWorkingCopy, CommandError> {
+fn check_local_disk_wc(x: &dyn WorkingCopy) -> Result<&LocalWorkingCopy, CommandError> {
     x.downcast_ref()
         .ok_or_else(|| user_error("This command requires a standard local-disk working copy"))
 }

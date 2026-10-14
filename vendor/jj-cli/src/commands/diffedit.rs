@@ -14,29 +14,31 @@
 
 use std::io::Write as _;
 
+use clap_complete::ArgValueCandidates;
 use clap_complete::ArgValueCompleter;
 use itertools::Itertools as _;
-use jj_lib::matchers::EverythingMatcher;
+use jj_lib::merge::Diff;
 use jj_lib::object_id::ObjectId as _;
 use jj_lib::rewrite::merge_commit_trees;
+use pollster::FutureExt as _;
 use tracing::instrument;
 
 use crate::cli_util::CommandHelper;
 use crate::cli_util::RevisionArg;
+use crate::cli_util::print_unmatched_explicit_paths;
 use crate::command_error::CommandError;
 use crate::complete;
 use crate::ui::Ui;
 
 /// Touch up the content changes in a revision with a diff editor
 ///
-/// With the `-r` option, which is the default, starts a [diff editor] on the
-/// changes in the revision.
+/// With the `-r` option, starts a [diff editor] on the changes in the revision.
 ///
 /// With the `--from` and/or `--to` options, starts a [diff editor] comparing
 /// the "from" revision to the "to" revision.
 ///
 /// [diff editor]:
-///     https://jj-vcs.github.io/jj/latest/config/#editing-diffs
+///     https://docs.jj-vcs.dev/latest/config/#editing-diffs
 ///
 /// Edit the right side of the diff until it looks the way you want. Once you
 /// close the editor, the revision specified with `-r` or `--to` will be
@@ -50,36 +52,34 @@ pub(crate) struct DiffeditArgs {
     /// The revision to touch up
     ///
     /// Defaults to @ if neither --to nor --from are specified.
-    #[arg(
-        long,
-        short,
-        value_name = "REVSET",
-        add = ArgValueCompleter::new(complete::revset_expression_mutable),
-    )]
+    #[arg(long, short, value_name = "REVSET")]
+    #[arg(add = ArgValueCompleter::new(complete::revset_expression_mutable))]
     revision: Option<RevisionArg>,
+
     /// Show changes from this revision
     ///
     /// Defaults to @ if --to is specified.
-    #[arg(
-        long, short,
-        conflicts_with = "revision",
-        value_name = "REVSET",
-        add = ArgValueCompleter::new(complete::revset_expression_all),
-    )]
+    #[arg(long, short, conflicts_with = "revision", value_name = "REVSET")]
+    #[arg(add = ArgValueCompleter::new(complete::revset_expression_all))]
     from: Option<RevisionArg>,
+
     /// Edit changes in this revision
     ///
     /// Defaults to @ if --from is specified.
-    #[arg(
-        long, short,
-        conflicts_with = "revision",
-        value_name = "REVSET",
-        add = ArgValueCompleter::new(complete::revset_expression_mutable),
-    )]
+    #[arg(long, short, conflicts_with = "revision", value_name = "REVSET")]
+    #[arg(add = ArgValueCompleter::new(complete::revset_expression_mutable))]
     to: Option<RevisionArg>,
+
+    /// Edit only these paths (unmatched paths will remain unchanged)
+    #[arg(value_name = "FILESETS", value_hint = clap::ValueHint::AnyPath)]
+    #[arg(add = ArgValueCompleter::new(complete::modified_revision_or_range_files))]
+    paths: Vec<String>,
+
     /// Specify diff editor to be used
     #[arg(long, value_name = "NAME")]
+    #[arg(add = ArgValueCandidates::new(complete::diff_editors))]
     tool: Option<String>,
+
     /// Preserve the content (not the diff) when rebasing descendants
     ///
     /// When rebasing a descendant on top of the rewritten revision, its diff
@@ -97,13 +97,17 @@ pub(crate) fn cmd_diffedit(
     args: &DiffeditArgs,
 ) -> Result<(), CommandError> {
     let mut workspace_command = command.workspace_helper(ui)?;
+    let fileset_expression = workspace_command.parse_file_patterns(ui, &args.paths)?;
+    let matcher = fileset_expression.to_matcher();
 
     let (target_commit, base_commits, diff_description);
     if args.from.is_some() || args.to.is_some() {
         target_commit = workspace_command
             .resolve_single_rev(ui, args.to.as_ref().unwrap_or(&RevisionArg::AT))?;
-        base_commits = vec![workspace_command
-            .resolve_single_rev(ui, args.from.as_ref().unwrap_or(&RevisionArg::AT))?];
+        base_commits = vec![
+            workspace_command
+                .resolve_single_rev(ui, args.from.as_ref().unwrap_or(&RevisionArg::AT))?,
+        ];
         diff_description = format!(
             "The diff initially shows the commit's changes relative to:\n{}",
             workspace_command.format_commit_summary(&base_commits[0])
@@ -130,15 +134,16 @@ don't make any changes, then the operation will be aborted.",
             tx.format_commit_summary(&target_commit),
         )
     };
-    let base_tree = merge_commit_trees(tx.repo(), base_commits.as_slice())?;
-    let tree = target_commit.tree()?;
-    let tree_id = diff_editor.edit(&base_tree, &tree, &EverythingMatcher, format_instructions)?;
-    if tree_id == *target_commit.tree_id() {
+    let base_tree = merge_commit_trees(tx.repo(), base_commits.as_slice()).block_on()?;
+    let tree = target_commit.tree();
+    let edited_tree =
+        diff_editor.edit(Diff::new(&base_tree, &tree), &matcher, format_instructions)?;
+    if edited_tree.tree_ids() == target_commit.tree_ids() {
         writeln!(ui.status(), "Nothing changed.")?;
     } else {
         tx.repo_mut()
             .rewrite_commit(&target_commit)
-            .set_tree_id(tree_id)
+            .set_tree(edited_tree)
             .write()?;
         // rebase_descendants early; otherwise `new_commit` would always have
         // a conflicted change id at this point.
@@ -150,15 +155,21 @@ don't make any changes, then the operation will be aborted.",
         } else {
             (tx.repo_mut().rebase_descendants()?, "")
         };
-        if let Some(mut formatter) = ui.status_formatter() {
-            if num_rebased > 0 {
-                writeln!(
-                    formatter,
-                    "Rebased {num_rebased} descendant commits{extra_msg}"
-                )?;
-            }
+        if let Some(mut formatter) = ui.status_formatter()
+            && num_rebased > 0
+        {
+            writeln!(
+                formatter,
+                "Rebased {num_rebased} descendant commits{extra_msg}"
+            )?;
         }
         tx.finish(ui, format!("edit commit {}", target_commit.id().hex()))?;
     }
+    print_unmatched_explicit_paths(
+        ui,
+        &workspace_command,
+        &fileset_expression,
+        [&base_tree, &tree],
+    )?;
     Ok(())
 }

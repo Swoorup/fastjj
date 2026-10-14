@@ -1,0 +1,105 @@
+package password
+
+import (
+	"charm.land/bubbles/v2/textinput"
+	tea "charm.land/bubbletea/v2"
+	"charm.land/lipgloss/v2"
+	"github.com/idursun/jjui/internal/ui/actions"
+	"github.com/idursun/jjui/internal/ui/common"
+	"github.com/idursun/jjui/internal/ui/intents"
+	"github.com/idursun/jjui/internal/ui/layout"
+	"github.com/idursun/jjui/internal/ui/render"
+	"github.com/idursun/jjui/internal/ui/theme"
+)
+
+var _ common.ImmediateModel = (*Model)(nil)
+
+type Model struct {
+	id         uint64
+	prompt     string
+	textInput  textinput.Model
+	passwordCh chan<- []byte
+}
+
+func New(msg common.TogglePasswordMsg) *Model {
+	ti := textinput.New()
+	ti.Prompt = "> "
+	if msg.EchoPassword {
+		ti.EchoMode = textinput.EchoPassword
+	}
+	ti.SetVirtualCursor(false)
+	ti.Focus()
+
+	return &Model{
+		id:         msg.ID,
+		prompt:     msg.Prompt,
+		textInput:  ti,
+		passwordCh: msg.Password,
+	}
+}
+
+func (m *Model) ID() uint64 { return m.id }
+
+func (m *Model) Scopes() []common.Scope {
+	return []common.Scope{
+		{
+			Name:    actions.ScopePassword,
+			Leak:    common.LeakNone,
+			Handler: m,
+		},
+	}
+}
+
+func (m *Model) HandleIntent(intent intents.Intent) (tea.Cmd, bool) {
+	switch intent.(type) {
+	case intents.Cancel:
+		return func() tea.Msg {
+			return common.TogglePasswordMsg{ID: m.id}
+		}, true
+	case intents.Apply:
+		m.passwordCh <- []byte(m.textInput.Value())
+		return func() tea.Msg {
+			return common.TogglePasswordMsg{ID: m.id}
+		}, true
+	}
+	return nil, false
+}
+
+func (m *Model) Init() tea.Cmd {
+	return nil
+}
+
+func (m *Model) Update(msg tea.Msg) tea.Cmd {
+	switch msg := msg.(type) {
+	case common.TogglePasswordMsg:
+		close(m.passwordCh)
+	case intents.Intent:
+		cmd, _ := m.HandleIntent(msg)
+		return cmd
+	case tea.KeyMsg, tea.PasteMsg:
+		var cmd tea.Cmd
+		m.textInput, cmd = m.textInput.Update(msg)
+		return cmd
+	}
+	return nil
+}
+
+func (m *Model) ViewRect(dl *render.DisplayContext, box layout.Box) {
+	dl.AddBackdrop(box.R, render.ZPassword-1)
+	borderStyle := theme.DefaultPalette.GetBorder("password", "", "border", false, lipgloss.NormalBorder()).Padding(1)
+	surfaceStyle := theme.DefaultPalette.Get("password", "", "", false)
+	ps := m.textInput.Styles()
+	ps.Focused.Prompt = theme.DefaultPalette.Get("password", "", "title", false)
+	ps.Blurred.Prompt = theme.DefaultPalette.Get("password", "", "title", false)
+	m.textInput.SetStyles(ps)
+
+	width := max(box.R.Dx()-6, 1)
+	m.textInput.SetWidth(max(width-2, 1))
+	prompt := ps.Focused.Prompt.Width(width).Render(m.prompt)
+	v := borderStyle.Width(max(box.R.Dx()-2, 0)).Render(prompt + "\n" + m.textInput.View())
+	box = box.Center(lipgloss.Size(v))
+	dl.AddFill(box.R, ' ', surfaceStyle, render.ZPassword)
+	dl.AddDraw(box.R, v, render.ZPassword)
+	dl.AddPaint(box.R, surfaceStyle, render.ZPassword)
+	dl.SetCursorInRect(m.textInput.Cursor(), box.R, 2, 2+lipgloss.Height(prompt))
+}

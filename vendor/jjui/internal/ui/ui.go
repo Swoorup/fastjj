@@ -1,0 +1,1068 @@
+package ui
+
+import (
+	"fmt"
+	"log"
+	"path/filepath"
+	"slices"
+	"strings"
+	"time"
+
+	tea "charm.land/bubbletea/v2"
+	uv "github.com/charmbracelet/ultraviolet"
+	"github.com/charmbracelet/x/ansi"
+	"github.com/idursun/jjui/internal/config"
+	"github.com/idursun/jjui/internal/jj"
+	"github.com/idursun/jjui/internal/scripting"
+	"github.com/idursun/jjui/internal/ui/actionmeta"
+	"github.com/idursun/jjui/internal/ui/actions"
+	"github.com/idursun/jjui/internal/ui/annotation"
+	keybindings "github.com/idursun/jjui/internal/ui/bindings"
+	"github.com/idursun/jjui/internal/ui/bookmarks"
+	"github.com/idursun/jjui/internal/ui/choose"
+	"github.com/idursun/jjui/internal/ui/common"
+	"github.com/idursun/jjui/internal/ui/context"
+	"github.com/idursun/jjui/internal/ui/diff"
+	"github.com/idursun/jjui/internal/ui/dispatch"
+	"github.com/idursun/jjui/internal/ui/exec_process"
+	"github.com/idursun/jjui/internal/ui/flash"
+	"github.com/idursun/jjui/internal/ui/git"
+	"github.com/idursun/jjui/internal/ui/help"
+	"github.com/idursun/jjui/internal/ui/input"
+	"github.com/idursun/jjui/internal/ui/intents"
+	"github.com/idursun/jjui/internal/ui/layout"
+	"github.com/idursun/jjui/internal/ui/operations/target_picker"
+	"github.com/idursun/jjui/internal/ui/oplog"
+	"github.com/idursun/jjui/internal/ui/password"
+	"github.com/idursun/jjui/internal/ui/redo"
+	"github.com/idursun/jjui/internal/ui/render"
+	"github.com/idursun/jjui/internal/ui/revisions"
+	"github.com/idursun/jjui/internal/ui/revset"
+	"github.com/idursun/jjui/internal/ui/split"
+	"github.com/idursun/jjui/internal/ui/status"
+	"github.com/idursun/jjui/internal/ui/theme"
+	"github.com/idursun/jjui/internal/ui/undo"
+)
+
+type Model struct {
+	revisions        *revisions.Model
+	oplog            *oplog.Model
+	revsetModel      *revset.Model
+	diff             *diff.Model
+	annotation       *annotation.Model
+	flash            *flash.Model
+	state            common.State
+	status           *status.Model
+	password         *password.Model
+	context          *context.MainContext
+	scriptRunners    []scriptFrame
+	sequenceHelp     []help.Entry
+	sequenceAutoOpen bool
+	resolver         *dispatch.Resolver
+	stacked          common.StackedModel
+	displayContext   *render.DisplayContext
+	frameCursor      *tea.Cursor
+	lastHighlighted  common.SelectedItem
+	width            int
+	height           int
+	splitContainer   *split.SplitContainer
+
+	// mode2031Supported is set when the terminal confirms it supports
+	// mode 2031 push. Once true, the OSC 11 polling loop stops.
+	mode2031Supported bool
+}
+
+var _ common.ApplicationStateProvider = (*Model)(nil)
+
+type scriptFrame struct {
+	runner       *scripting.Runner
+	completionID string
+}
+
+type triggerAutoRefreshMsg struct{}
+
+const scopeUi keybindings.ScopeName = "ui"
+
+// colorSchemePollInterval is how often to poll the terminal for its
+// current light/dark mode.
+var colorSchemePollInterval = time.Second
+
+func (m *Model) Init() tea.Cmd {
+	return tea.Batch(m.revisions.Init(), m.scheduleAutoRefresh())
+}
+
+func (m *Model) selectionSnapshot() common.SelectionSnapshot {
+	var snapshot common.SelectionSnapshot
+	for _, provider := range m.selectionProviders() {
+		part := provider.Selection()
+		if snapshot.Highlighted == nil && part.Highlighted != nil {
+			snapshot.Highlighted = part.Highlighted
+		}
+		snapshot.Checked = append(snapshot.Checked, part.Checked...)
+	}
+	return snapshot
+}
+
+func (m *Model) Selection() common.SelectionSnapshot {
+	return m.selectionSnapshot()
+}
+
+// QueryState resolves public Lua state paths against retained model owners.
+// Focus and visibility do not participate in lookup; owners decide whether a
+// model is still live and can answer the local property.
+func (m *Model) QueryState(name string) (any, bool) {
+	if strings.HasPrefix(name, "revisions.") && m.revisions != nil {
+		return m.revisions.QueryState(strings.TrimPrefix(name, "revisions."))
+	}
+	return nil, false
+}
+
+func (m *Model) selectionProviders() []common.SelectionProvider {
+	var providers []common.SelectionProvider
+	if provider, ok := m.stacked.(common.SelectionProvider); ok {
+		providers = append(providers, provider)
+	}
+	if m.oplog != nil {
+		providers = append(providers, m.oplog)
+	}
+	if m.revisions != nil {
+		providers = append(providers, m.revisions)
+	}
+	return providers
+}
+
+func (m *Model) notifyHighlightChange() tea.Cmd {
+	snapshot := m.selectionSnapshot()
+	if selectedItemsEqual(snapshot.Highlighted, m.lastHighlighted) {
+		return nil
+	}
+	m.lastHighlighted = snapshot.Highlighted
+	return common.SelectionChanged(snapshot.Highlighted)
+}
+
+func selectedItemsEqual(a, b common.SelectedItem) bool {
+	if a == nil || b == nil {
+		return a == nil && b == nil
+	}
+	return a.Equal(b)
+}
+
+func (m *Model) closeTopScope(msg common.CloseViewMsg) (tea.Cmd, bool) {
+	// The expanded status help is an overlay over the active view. When there
+	// is no stacked modal, close the overlay before closing that view.
+	if !msg.Applied && m.stacked == nil && m.status != nil && m.status.StatusExpanded() {
+		m.status.SetStatusExpanded(false)
+		return nil, true
+	}
+	if m.annotation != nil {
+		if !msg.Applied {
+			if cmd, canClose := m.annotation.RequestClose(); !canClose {
+				return cmd, true
+			}
+		}
+		m.annotation = nil
+		return nil, true
+	}
+	if m.diff != nil {
+		m.diff = nil
+		return nil, true
+	}
+	if m.stacked != nil {
+		cmd := m.stacked.Update(msg)
+		m.stacked = nil
+		return cmd, true
+	}
+	if m.oplog != nil {
+		m.oplog = nil
+		return nil, true
+	}
+	if m.splitContainer.ContentFocused() && m.splitContainer.Close() {
+		return nil, true
+	}
+	return nil, false
+}
+
+func (m *Model) Update(msg tea.Msg) (cmd tea.Cmd) {
+	var completionID string
+	defer func() {
+		cmd = tea.Batch(cmd, m.notifyHighlightChange())
+		// Dispatched actions must finish their commands and selection notification
+		// before Lua resumes. Batching around the completion sequence would race it.
+		cmd = tea.Sequence(cmd, actionCompleted(completionID))
+	}()
+
+	if closeMsg, ok := msg.(common.CloseViewMsg); ok {
+		if cmd, handled := m.closeTopScope(closeMsg); handled {
+			return cmd
+		}
+	}
+
+	var cmds []tea.Cmd
+
+	if cmd, handled := m.handleSplitMsg(msg); handled {
+		return cmd
+	} else if cmd != nil {
+		cmds = append(cmds, cmd)
+	}
+
+	switch msg := msg.(type) {
+	case tea.ModeReportMsg:
+		if msg.Mode == ansi.ModeUnicodeCore {
+			if msg.Value == ansi.ModeReset || msg.Value == ansi.ModeSet || msg.Value == ansi.ModePermanentlySet {
+				render.SetWidthMethod(ansi.GraphemeWidth)
+			}
+		}
+		// reply from initial ansi.RequestModeLightDark check
+		if msg.Mode == ansi.ModeLightDark && !msg.Value.IsNotRecognized() {
+			m.mode2031Supported = true
+		}
+		return nil
+	case uv.UnknownOscEvent:
+		if reply, ok := parseTerminalPaletteReply(msg); ok {
+			if m.context.TerminalPalette == nil {
+				m.context.TerminalPalette = make(map[int]string)
+			}
+			previous := m.context.TerminalPalette[reply.Slot]
+			m.context.TerminalPalette[reply.Slot] = reply.Hex
+			log.Printf("terminal palette reply: slot=%d color=%s raw=%q", reply.Slot, reply.Hex, reply.Raw)
+			if m.context.ThemeBackgroundBlend > 0 && previous != reply.Hex {
+				return m.reloadActiveTheme()
+			}
+			return nil
+		}
+		return nil
+	case tea.FocusMsg:
+		if m.state == common.Ready {
+			return common.RefreshAndKeepSelections
+		}
+		return nil
+	case tea.ResumeMsg:
+		// common.Suspend disables mode 2031 on the way out, reenable it on resume.
+		// Also re-query the background color in case the theme changed while suspended.
+		return tea.Batch(
+			tea.Raw(ansi.SetModeLightDark),
+			requestTerminalAppearance(m.context.ThemeBackgroundBlend),
+		)
+	case uv.DarkColorSchemeEvent:
+		return m.applyColorScheme(true)
+	case uv.LightColorSchemeEvent:
+		return m.applyColorScheme(false)
+	case tea.BackgroundColorMsg:
+		if msg.Color == nil {
+			return nil
+		}
+		return m.applyTerminalBackground(msg.String(), msg.IsDark())
+	case colorSchemePollTickMsg:
+		if m.mode2031Supported {
+			return nil
+		}
+		return tea.Batch(tea.RequestBackgroundColor, scheduleColorSchemePoll())
+	case tea.MouseReleaseMsg, tea.MouseMotionMsg:
+		if m.handleSplitMouseMsg(msg) {
+			return nil
+		}
+	case tea.MouseClickMsg, tea.MouseWheelMsg:
+		if m.displayContext != nil {
+			if interactionMsg, handled := m.displayContext.ProcessMouseEvent(msg.(tea.MouseMsg)); handled {
+				if interactionMsg != nil {
+					return func() tea.Msg { return interactionMsg }
+				}
+				return nil
+			}
+		}
+		return nil
+	case tea.KeyMsg:
+		if m.resolver != nil {
+			scopes := m.dispatchScopes()
+			result := m.resolver.ResolveKey(msg, scopes)
+			if result.Pending {
+				m.setSequenceStatusHelp(result.Continuations)
+				return nil
+			}
+			m.clearSequenceStatusHelp()
+			if result.LuaScript != "" {
+				return luaCmd(result.LuaScript)
+			}
+			if result.Intent != nil {
+				start := slices.IndexFunc(scopes, func(scope common.Scope) bool {
+					return string(scope.Name) == result.Scope
+				})
+				if start < 0 {
+					return nil
+				}
+				if cmd, handled := common.RouteIntent(scopes[start:], result.Intent); handled {
+					return cmd
+				}
+				if scopes[start].Leak != common.LeakAll {
+					return m.updateBlockingScope(scopes[start], msg)
+				}
+				return nil
+			}
+			if result.Consumed {
+				return nil
+			}
+
+			for _, scope := range scopes {
+				if scope.Leak != common.LeakAll {
+					return m.updateBlockingScope(scope, msg)
+				}
+			}
+			return nil
+		}
+		return nil
+	case intents.Intent:
+		if cmd, handled := m.HandleIntent(msg); handled {
+			return cmd
+		}
+	case common.ExecMsg:
+		return exec_process.ExecLine(m.context, msg)
+	case common.ExecProcessCompletedMsg:
+		cmds = append(cmds, common.Refresh)
+		if msg.Err != nil {
+			cmds = append(cmds, intents.Invoke(intents.AddMessage{Text: msg.Err.Error(), Err: msg.Err}))
+		}
+	case common.UpdateRevisionsSuccessMsg:
+		m.state = common.Ready
+	case triggerAutoRefreshMsg:
+		return tea.Batch(m.scheduleAutoRefresh(), func() tea.Msg {
+			return common.AutoRefreshMsg{}
+		})
+	case common.UpdateRevSetMsg:
+		m.context.CurrentRevset = string(msg)
+		if m.context.CurrentRevset == "" {
+			m.context.CurrentRevset = m.context.DefaultRevset
+		}
+		m.revsetModel.AddToHistory(m.context.CurrentRevset)
+		m.revsetModel.Update(msg)
+		return common.Refresh
+	case common.RunLuaScriptMsg:
+		if msg.CompletionID == "" && m.scriptRunning() {
+			err := fmt.Errorf("lua script is already running")
+			return intents.Invoke(intents.AddMessage{Text: err.Error(), Err: err})
+		}
+		runner, cmd, err := scripting.RunScript(m.context, msg.Script)
+		if err != nil {
+			return tea.Sequence(func() tea.Msg {
+				return common.CommandCompletedMsg{Err: err}
+			}, actionCompleted(msg.CompletionID))
+		}
+		if runner != nil && !runner.Done() {
+			m.scriptRunners = append(m.scriptRunners, scriptFrame{
+				runner:       runner,
+				completionID: msg.CompletionID,
+			})
+			return cmd
+		}
+		return tea.Sequence(cmd, actionCompleted(msg.CompletionID))
+	case common.DispatchActionMsg:
+		if actionmeta.IsBuiltInAction(msg.Action) {
+			if err := actionmeta.ValidateBuiltInActionArgs(msg.Action, msg.Args); err != nil {
+				return tea.Sequence(
+					intents.Invoke(intents.AddMessage{Text: err.Error(), Err: err}),
+					actionCompleted(msg.CompletionID),
+				)
+			}
+		}
+		action := keybindings.Action(strings.TrimSpace(msg.Action))
+		var result dispatch.Result
+		if msg.BuiltIn {
+			result = m.resolver.ResolveBuiltInAction(action, msg.Args)
+		} else {
+			result = m.resolver.ResolveAction(action, msg.Args)
+		}
+		if result.LuaScript != "" {
+			return luaCmdWithCompletion(result.LuaScript, msg.CompletionID)
+		}
+		if result.Intent != nil {
+			scopes := m.dispatchScopes()
+			cmd, _ := common.RouteIntent(scopes, result.Intent)
+			completionID = msg.CompletionID
+			return cmd
+		}
+		return actionCompleted(msg.CompletionID)
+	case common.ShowChooseMsg:
+		model := choose.NewWithOptions(msg.Options, msg.Title, msg.Ordered)
+		m.stacked = model
+		return m.stacked.Init()
+	case choose.SelectedMsg:
+		m.stacked = nil
+	case choose.CancelledMsg:
+		m.stacked = nil
+	case common.ShowInputMsg:
+		model := input.NewWithTitle(msg.Title, msg.Prompt, msg.Value)
+		m.stacked = model
+		return m.stacked.Init()
+	case input.SelectedMsg, input.CancelledMsg:
+		m.stacked = nil
+	case common.OpenTargetPickerMsg:
+		if m.annotation != nil || m.diff != nil {
+			model := target_picker.NewModel(m.context, msg.Payload, msg.Sources...)
+			m.stacked = model
+			return m.stacked.Init()
+		}
+	case target_picker.TargetSelectedMsg:
+		if m.annotation != nil && m.stacked != nil {
+			m.stacked = nil
+			return m.annotation.Update(msg)
+		}
+		if m.diff != nil && m.stacked != nil {
+			m.stacked = nil
+			return m.diff.Update(msg)
+		}
+	case target_picker.TargetPickerCancelMsg:
+		if (m.annotation != nil || m.diff != nil) && m.stacked != nil {
+			m.stacked = nil
+			return nil
+		}
+	case common.TogglePasswordMsg:
+		if msg.Password == nil {
+			if m.password != nil && m.password.ID() == msg.ID {
+				// let the current prompt clean itself
+				m.password.Update(msg)
+				m.password = nil
+			}
+		} else {
+			if m.password != nil {
+				// Close the superseded prompt's response channel.
+				m.password.Update(common.TogglePasswordMsg{ID: m.password.ID()})
+			}
+			// overwrite current prompt. This can happen for ssh-sk keys:
+			//   - first prompt reads "Confirm user presence for ..."
+			//   - if the user denies the request on the device, a new prompt automatically happen "Enter PIN for ...
+			m.password = password.New(msg)
+		}
+	case tea.WindowSizeMsg:
+		m.width = msg.Width
+		m.height = msg.Height
+	}
+
+	// Unhandled key messages go to the main view (oplog or revisions)
+	// Other messages are broadcast to all models
+	if common.IsInputMessage(msg) {
+		if m.oplog != nil {
+			cmds = append(cmds, m.oplog.Update(msg))
+		} else {
+			cmds = append(cmds, m.revisions.Update(msg))
+		}
+		return tea.Batch(cmds...)
+	}
+
+	cmds = append(cmds, m.revsetModel.Update(msg))
+	cmds = append(cmds, m.status.Update(msg))
+	cmds = append(cmds, m.flash.Update(msg))
+	if m.diff != nil {
+		cmds = append(cmds, m.diff.Update(msg))
+	}
+	if m.annotation != nil {
+		cmds = append(cmds, m.annotation.Update(msg))
+	}
+
+	if m.stacked != nil {
+		cmds = append(cmds, m.stacked.Update(msg))
+	}
+
+	if len(m.scriptRunners) > 0 {
+		if cmd := m.handleScriptMsg(msg); cmd != nil {
+			cmds = append(cmds, cmd)
+		}
+	}
+
+	if m.oplog != nil {
+		cmds = append(cmds, m.oplog.Update(msg))
+	} else {
+		cmds = append(cmds, m.revisions.Update(msg))
+	}
+
+	cmds = append(cmds, m.updateSplit(msg))
+
+	return tea.Batch(cmds...)
+}
+
+func (m *Model) updateStatus() {
+	m.status.Sync(m.dispatchScopes(), m.sequenceHelp)
+}
+
+func (m *Model) View() string {
+	if m.width == 0 || m.height == 0 {
+		return ""
+	}
+
+	m.displayContext = render.NewDisplayContext()
+
+	m.updateStatus()
+
+	box := layout.NewBox(layout.Rect(0, 0, m.width, m.height))
+	screenBuf := render.NewScreenBuffer(m.width, m.height)
+
+	if m.annotation != nil {
+		m.renderAnnotationLayout(box)
+	} else if m.diff != nil {
+		m.renderDiffLayout(box)
+	} else {
+		m.updateSplitAutoPosition()
+		if m.oplog != nil {
+			m.renderOpLogLayout(box)
+		} else {
+			m.renderRevisionsLayout(box)
+		}
+	}
+
+	if m.stacked != nil {
+		m.stacked.ViewRect(m.displayContext, box)
+	}
+
+	if m.password == nil {
+
+		if scope, ok := m.stackedScope(); !ok || scope != actions.ScopeCommandHistory {
+			flashBox := box
+			if footerHeight := m.footerHeight(box); footerHeight > 0 {
+				flashBox, _ = box.CutBottom(footerHeight)
+			}
+			m.flash.ViewRect(m.displayContext, flashBox)
+		}
+	}
+
+	m.splitContainer.RenderOverlay(m.displayContext, box)
+
+	if m.password != nil {
+		m.password.ViewRect(m.displayContext, box)
+	}
+
+	m.displayContext.Render(screenBuf)
+	finalView := screenBuf.Render()
+	m.frameCursor = m.displayContext.Cursor()
+	return strings.ReplaceAll(finalView, "\r", "")
+}
+
+func (m *Model) renderDiffLayout(box layout.Box) {
+	m.renderWithStatus(box, func(content layout.Box) {
+		m.diff.ViewRect(m.displayContext, content)
+	})
+}
+
+func (m *Model) renderAnnotationLayout(box layout.Box) {
+	m.renderWithStatus(box, func(content layout.Box) {
+		m.annotation.ViewRect(m.displayContext, content)
+	})
+}
+
+func (m *Model) renderOpLogLayout(box layout.Box) {
+	m.renderWithStatus(box, func(content layout.Box) {
+		m.renderSplit(m.oplog, content)
+	})
+}
+
+func (m *Model) renderRevisionsLayout(box layout.Box) {
+	content, input, status := m.splitFooter(box)
+	rows := content.V(layout.Fixed(1), layout.Fill(1))
+	m.revsetModel.ViewRect(m.displayContext, rows[0])
+	m.renderSplit(m.revisions, rows[1])
+	m.renderFooter(input, status)
+}
+
+func (m *Model) renderWithStatus(box layout.Box, renderContent func(layout.Box)) {
+	content, input, status := m.splitFooter(box)
+	renderContent(content)
+	m.renderFooter(input, status)
+}
+
+func (m *Model) splitFooter(box layout.Box) (content, input, status layout.Box) {
+	content = box
+	footerHeight := m.footerHeight(box)
+	if footerHeight == 0 {
+		return content, input, status
+	}
+
+	content, footer := box.CutBottom(footerHeight)
+	if m.status.IsFocused() {
+		if footerHeight == 1 {
+			input = footer
+			return content, input, status
+		}
+		rows := footer.V(layout.Fixed(1), layout.Fixed(1))
+		input, status = rows[0], rows[1]
+		return content, input, status
+	}
+	status = footer
+	return content, input, status
+}
+
+func (m *Model) footerHeight(box layout.Box) int {
+	if m.status.IsFocused() {
+		return min(box.R.Dy(), 2)
+	}
+	return min(box.R.Dy(), 1)
+}
+
+func (m *Model) renderFooter(input, status layout.Box) {
+	if input.R.Dy() > 0 {
+		m.status.ViewInputRect(m.displayContext, input)
+	}
+	if status.R.Dy() > 0 {
+		m.status.ViewStatusRect(m.displayContext, status)
+	}
+}
+
+func (m *Model) scheduleAutoRefresh() tea.Cmd {
+	interval := config.Current.UI.AutoRefreshInterval
+	if interval > 0 {
+		return tea.Tick(time.Duration(interval)*time.Second, func(time.Time) tea.Msg {
+			return triggerAutoRefreshMsg{}
+		})
+	}
+	return nil
+}
+
+func (m *Model) dispatchScopes() []common.Scope {
+	var scopes []common.Scope
+
+	if m.password != nil {
+		scopes = append(scopes, m.password.Scopes()...)
+	}
+
+	scopes = append(scopes, m.status.Scopes()...)
+	if m.revsetModel.IsEditing() {
+		scopes = append(scopes, m.revsetModel.Scopes()...)
+	}
+
+	if m.stacked != nil && (m.diff != nil || m.annotation != nil) {
+		scopes = append(scopes, m.stacked.Scopes()...)
+	}
+
+	if m.annotation != nil {
+		scopes = append(scopes, m.annotation.Scopes()...)
+	} else if m.diff != nil {
+		scopes = append(scopes, m.diff.Scopes()...)
+	}
+
+	if m.stacked != nil && m.diff == nil && m.annotation == nil {
+		scopes = append(scopes, m.stacked.Scopes()...)
+	} else if m.oplog != nil {
+		scopes = append(scopes, m.splitScopes(m.oplog.Scopes())...)
+	} else {
+		scopes = append(scopes, m.splitScopes(m.revisions.Scopes())...)
+	}
+
+	if !m.revsetModel.IsEditing() {
+		scopes = append(scopes, m.revsetModel.Scopes()...)
+	}
+	scopes = append(scopes, common.Scope{
+		Name:    scopeUi,
+		Leak:    common.LeakNone,
+		Global:  true,
+		Handler: m,
+	})
+
+	return scopes
+}
+
+func (m *Model) HandleIntent(intent intents.Intent) (tea.Cmd, bool) {
+	if cmd, handled := m.handleSplitIntent(intent); handled {
+		return cmd, true
+	}
+
+	switch intent := intent.(type) {
+
+	// --- Quit / Suspend ---
+	case intents.Quit:
+		return common.Quit(), true
+	case intents.Suspend:
+		return common.Suspend(), true
+	case intents.ChangeTheme:
+		return m.changeTheme(intent), true
+
+	// --- Cancel fallback (only reached if no inner scope handled it) ---
+	case intents.Cancel:
+		if m.flash.Any() {
+			m.flash.DeleteOldest()
+			return nil, true
+		}
+		if m.stacked != nil || m.diff != nil || m.annotation != nil || m.oplog != nil {
+			return common.Close, true
+		}
+		if m.status.StatusExpanded() {
+			m.status.ToggleStatusExpand()
+			return nil, true
+		}
+		return nil, false
+
+	// --- Open stacked views ---
+	case intents.OpenGit:
+		model := git.NewModel(m.context, m.revisions.SelectedRevisions())
+		m.stacked = model
+		return m.stacked.Init(), true
+	case intents.OpenBookmarks:
+		if config.Current.Bookmark.InteractiveBookmarkPane {
+			cmd, _ := m.handleSplitIntent(intents.ToggleBookmarkPane{})
+			return cmd, true
+		}
+		current := m.revisions.SelectedRevision()
+		if current == nil {
+			return nil, true
+		}
+		changeIds := m.revisions.GetCommitIds()
+		model := bookmarks.NewModel(m.context, current, changeIds)
+		m.stacked = model
+		return m.stacked.Init(), true
+	case intents.OpLogOpen:
+		m.oplog = oplog.New(m.context)
+		return m.oplog.Init(), true
+	case intents.Undo:
+		model := undo.NewModel(m.context)
+		m.stacked = model
+		return m.stacked.Init(), true
+	case intents.Redo:
+		model := redo.NewModel(m.context)
+		m.stacked = model
+		return m.stacked.Init(), true
+	case intents.OpenHelp:
+		if m.stacked != nil || m.diff != nil || m.annotation != nil {
+			return nil, true
+		}
+		model := help.New()
+		m.stacked = model
+		return m.stacked.Init(), true
+	case intents.CommandHistoryToggle:
+		if scope, ok := m.stackedScope(); ok && scope == actions.ScopeCommandHistory {
+			m.stacked = nil
+			return nil, true
+		}
+		m.stacked = m.flash.NewHistory()
+		return m.stacked.Init(), true
+
+	// --- Activate input modes ---
+	case intents.Edit:
+		return m.revsetModel.Update(intent), true
+	case intents.ExecJJ:
+		return m.status.StartExec(common.ExecJJ), true
+	case intents.ExecShell:
+		return m.status.StartExec(common.ExecShell), true
+	case intents.QuickSearch:
+		return m.status.StartQuickSearch(), true
+	case intents.FileSearchToggle:
+		rev := m.revisions.SelectedRevision()
+		if rev == nil {
+			return nil, true
+		}
+		out, _ := m.context.RunCommandImmediate(jj.FilesInRevision(rev))
+		return common.FileSearch(m.context.CurrentRevset, rev, out, m.context.Location, m.context.WorkingDirectory), true
+
+	// --- Delegated intents ---
+	case intents.DiffShow:
+		if m.diff == nil {
+			m.diff = diff.NewWithContext(m.context, "", nil)
+		}
+		return m.diff.Update(intent), true
+	case intents.AnnotationShow:
+		if intent.ChangeID == "" {
+			return nil, true
+		}
+		m.annotation = annotation.New(m.context, intent.ChangeID)
+		return m.annotation.Init(), true
+	// --- Status ---
+	case intents.ExpandStatusToggle:
+		m.status.ToggleStatusExpand()
+		return nil, true
+	}
+
+	return nil, false
+}
+
+func luaCmd(script string) tea.Cmd {
+	return luaCmdWithCompletion(script, "")
+}
+
+func luaCmdWithCompletion(script string, completionID string) tea.Cmd {
+	return func() tea.Msg {
+		return common.RunLuaScriptMsg{Script: script, CompletionID: completionID}
+	}
+}
+
+func actionCompleted(id string) tea.Cmd {
+	if id == "" {
+		return nil
+	}
+	return func() tea.Msg {
+		return common.ActionCompletedMsg{ID: id}
+	}
+}
+
+func (m *Model) scriptRunning() bool {
+	return len(m.scriptRunners) > 0
+}
+
+func (m *Model) handleScriptMsg(msg tea.Msg) tea.Cmd {
+	if len(m.scriptRunners) == 0 {
+		return nil
+	}
+	top := len(m.scriptRunners) - 1
+	frame := m.scriptRunners[top]
+	cmd := frame.runner.HandleMsg(msg)
+	if !frame.runner.Done() {
+		return cmd
+	}
+	m.scriptRunners = m.scriptRunners[:top]
+	return tea.Sequence(cmd, actionCompleted(frame.completionID))
+}
+
+func (m *Model) changeTheme(intent intents.ChangeTheme) tea.Cmd {
+	name := strings.TrimSpace(intent.Name)
+	if name == "" {
+		err := fmt.Errorf("theme name is required")
+		return intents.Invoke(intents.AddMessage{Text: err.Error(), Err: err})
+	}
+
+	oldDark := config.Current.UI.Theme.Dark
+	oldLight := config.Current.UI.Theme.Light
+
+	if m.context.TerminalHasDarkBackground {
+		config.Current.UI.Theme.Dark = name
+	} else {
+		config.Current.UI.Theme.Light = name
+	}
+
+	if err := m.validateRuntimeThemeChange(); err != nil {
+		config.Current.UI.Theme.Dark = oldDark
+		config.Current.UI.Theme.Light = oldLight
+		return intents.Invoke(intents.AddMessage{Text: err.Error(), Err: err})
+	}
+
+	cmd := m.reloadActiveTheme()
+	log.Printf("theme changed to %q", name)
+	return cmd
+}
+
+func (m *Model) validateRuntimeThemeChange() error {
+	_, err := m.resolveActiveTheme()
+	return err
+}
+
+func (m *Model) stackedScope() (keybindings.ScopeName, bool) {
+	if m.stacked == nil {
+		return "", false
+	}
+	scopes := m.stacked.Scopes()
+	if len(scopes) == 0 || scopes[0].Name == "" {
+		return "", false
+	}
+	return scopes[0].Name, true
+}
+
+func (m *Model) updateBlockingScope(scope common.Scope, msg tea.KeyMsg) tea.Cmd {
+	if scope.Handler == m {
+		return nil
+	}
+	if scope.Handler == m.revsetModel {
+		m.state = common.Loading
+	}
+	return scope.Handler.Update(msg)
+}
+
+var _ tea.Model = (*wrapper)(nil)
+
+type (
+	frameTickMsg           struct{}
+	colorSchemePollTickMsg struct{}
+	wrapper                struct {
+		ui                 *Model
+		scheduledNextFrame bool
+		render             bool
+		cachedFrame        string
+		cachedCursor       *tea.Cursor
+	}
+)
+
+func (w *wrapper) Init() tea.Cmd {
+	return tea.Batch(
+		w.ui.Init(),
+		// Enable mode 2031 push notifications and probe whether the terminal
+		// supports it. If supported, the mode request returns a tea.ModeReportMsg
+		// with ansi.ModeLightDark, and uv.Light/DarkColorSchemeEvent are delivered
+		// on OS theme change.
+		tea.Raw(ansi.SetModeLightDark),
+		tea.Raw(ansi.RequestModeLightDark),
+		requestTerminalAppearance(w.ui.context.ThemeBackgroundBlend),
+		// Start OSC 11 polling as a baseline for light/dark mode detection
+		scheduleColorSchemePoll(),
+	)
+}
+
+// scheduleColorSchemePoll returns a Cmd that fires a colorSchemePollTickMsg
+// after colorSchemePollInterval.
+func scheduleColorSchemePoll() tea.Cmd {
+	return tea.Tick(colorSchemePollInterval, func(time.Time) tea.Msg {
+		return colorSchemePollTickMsg{}
+	})
+}
+
+func (w *wrapper) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
+	if _, ok := msg.(frameTickMsg); ok {
+		w.render = true
+		w.scheduledNextFrame = false
+		return w, nil
+	}
+	var cmd tea.Cmd
+	cmd = w.ui.Update(msg)
+	if _, ok := msg.(common.ExecMsg); ok {
+		// Force a fresh frame before Bubble Tea releases/restores the terminal
+		// for tea.Exec. Otherwise RestoreTerminal can repaint using the last
+		// cached cursor-bearing frame from the command prompt.
+		w.render = true
+		w.scheduledNextFrame = false
+		return w, cmd
+	}
+	if !w.scheduledNextFrame {
+		w.scheduledNextFrame = true
+		return w, tea.Batch(cmd, tea.Tick(time.Millisecond*8, func(t time.Time) tea.Msg {
+			return frameTickMsg{}
+		}))
+	}
+	return w, cmd
+}
+
+func (w *wrapper) View() tea.View {
+	if w.render {
+		w.cachedFrame = w.ui.View()
+		w.cachedCursor = w.ui.frameCursor
+		w.render = false
+	}
+	v := tea.NewView(w.cachedFrame)
+	v.Cursor = w.cachedCursor
+	if config.Current.UI.SetWindowTitle != config.WindowTitleOff {
+		title := w.ui.context.Location
+		if config.Current.UI.SetWindowTitle == config.WindowTitleBase {
+			title = filepath.Base(title)
+		}
+		v.WindowTitle = fmt.Sprintf("jjui - %s", title)
+	}
+	v.AltScreen = true
+	v.ReportFocus = true
+	v.MouseMode = tea.MouseModeCellMotion
+	if !config.Current.UI.MouseSupport {
+		v.MouseMode = tea.MouseModeNone
+	}
+	return v
+}
+
+func NewUI(c *context.MainContext) *Model {
+	revisionsModel := revisions.New(c)
+	statusModel := status.New(c)
+	flashView := flash.New()
+	revsetModel := revset.New(c)
+
+	ui := &Model{
+		context:     c,
+		state:       common.Loading,
+		revisions:   revisionsModel,
+		status:      statusModel,
+		revsetModel: revsetModel,
+		flash:       flashView,
+	}
+	c.SetStateProvider(ui)
+	ui.initSplitContainer()
+	ui.initResolver()
+	return ui
+}
+
+func (m *Model) setSequenceStatusHelp(continuations []dispatch.Continuation) {
+	entries := help.BuildFromContinuations(continuations)
+	if len(entries) == 0 {
+		return
+	}
+
+	if m.sequenceHelp == nil {
+		if !m.status.StatusExpanded() {
+			m.status.SetStatusExpanded(true)
+			m.sequenceAutoOpen = true
+		} else {
+			m.sequenceAutoOpen = false
+		}
+	}
+	m.sequenceHelp = entries
+}
+
+func (m *Model) clearSequenceStatusHelp() {
+	if m.sequenceHelp == nil {
+		return
+	}
+	m.sequenceHelp = nil
+	if m.sequenceAutoOpen {
+		m.status.SetStatusExpanded(false)
+	}
+	m.sequenceAutoOpen = false
+}
+
+func (m *Model) initResolver() {
+	bindings := config.BindingsToRuntime(config.Current.Bindings)
+	dispatcher, err := dispatch.NewDispatcher(bindings)
+	if err != nil {
+		return
+	}
+	m.resolver = dispatch.NewResolver(dispatcher)
+}
+
+// applyColorScheme reloads the palette when the terminal's color scheme
+// changes (that is, the OS switched between light and dark mode).
+func (m *Model) applyColorScheme(isDark bool) tea.Cmd {
+	if isDark == m.context.TerminalHasDarkBackground {
+		return nil
+	}
+	scheme := "light"
+	if isDark {
+		scheme = "dark"
+	}
+	log.Printf("color scheme changed to %s", scheme)
+	m.context.TerminalHasDarkBackground = isDark
+	cmd := m.reloadActiveTheme()
+	return tea.Batch(cmd, requestTerminalAppearance(m.context.ThemeBackgroundBlend))
+}
+
+func (m *Model) applyTerminalBackground(background string, isDark bool) tea.Cmd {
+	hadBackground := m.context.TerminalBackground != ""
+	backgroundChanged := background != "" && background != m.context.TerminalBackground
+	if background != "" {
+		m.context.TerminalBackground = background
+	}
+
+	if isDark != m.context.TerminalHasDarkBackground {
+		return m.applyColorScheme(isDark)
+	}
+	if backgroundChanged && m.context.ThemeBackgroundBlend > 0 {
+		if hadBackground {
+			return tea.Batch(
+				m.reloadActiveTheme(),
+				requestTerminalPaletteIfNeeded(m.context.ThemeBackgroundBlend),
+			)
+		}
+		return m.reloadActiveTheme()
+	}
+	return nil
+}
+
+func (m *Model) reloadActiveTheme() tea.Cmd {
+	resolvedTheme, err := m.resolveActiveTheme()
+	if err != nil {
+		log.Printf("failed to resolve theme: %v", err)
+		return nil
+	}
+	m.context.ThemeBackgroundBlend = resolvedTheme.BackgroundBlend
+	theme.DefaultPalette.Update(resolvedTheme.Colors)
+	theme.DefaultPalette.ConfigureBackgroundBlend(
+		resolvedTheme.BackgroundBlend,
+		m.context.TerminalBackground,
+		m.context.TerminalPalette,
+	)
+	return func() tea.Msg { return common.ThemeChangedMsg{} }
+}
+
+func (m *Model) resolveActiveTheme() (config.ResolvedTheme, error) {
+	resolvedTheme, err := config.ResolveTheme(m.context.TerminalHasDarkBackground, m.context.JJConfig.GetApplicableColors())
+	if err != nil {
+		return config.ResolvedTheme{}, err
+	}
+	return resolvedTheme, nil
+}
+
+func New(c *context.MainContext) tea.Model {
+	return &wrapper{ui: NewUI(c)}
+}

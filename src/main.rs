@@ -1,7 +1,7 @@
 use std::ffi::OsString;
 use std::process::ExitCode;
 
-use fastjj::{editor, privacy, request};
+use fastjj::{editor, privacy, prompt, request};
 use jj_cli::cli_util::CliRunner;
 use jj_cli::command_error::user_error;
 
@@ -12,15 +12,36 @@ fn run() -> Result<ExitCode, Box<dyn std::error::Error>> {
     // SAFETY: jj and its workers have not been initialized yet.
     let _ssh_transport = unsafe { fastjj::ssh::install()? };
     jj_cli::description_util::register_builtin_text_editor(editor::edit);
+    jj_lib::git::register_credential_prompt(prompt::read);
+    jj_cli::ui::register_builtin_prompt(prompt::read, prompt::available);
 
     let mut args: Vec<OsString> = std::env::args_os().skip(1).collect();
-    if args.first().is_some_and(|s| s == "--request-stdin") {
+    if args == [OsString::from("--interface-version")] {
+        println!("fastjj-private-v1 jj=0.37.0");
+        return Ok(ExitCode::SUCCESS);
+    }
+    if args
+        .first()
+        .is_some_and(|s| s == "--request-stdin" || s == "--request-fd")
+    {
         if args.len() != 1 {
             return Err(
-                "--request-stdin must be used alone; put jj options in the JSON args array".into(),
+                "private request flags must be used alone; put jj options in the JSON args array"
+                    .into(),
             );
         }
-        let private = request::read(std::io::stdin().lock())?;
+        let inherited = args[0] == "--request-fd";
+        let private = if inherited {
+            request::read_fd()?
+        } else {
+            request::read(std::io::stdin().lock())?
+        };
+        if private.prompt {
+            if !inherited {
+                return Err("UI prompts require --request-fd".into());
+            }
+            prompt::install(4)?;
+        }
         if let Some(cwd) = private.cwd {
             std::env::set_current_dir(cwd).map_err(|_| "cannot open request working directory")?;
         }
@@ -29,17 +50,21 @@ fn run() -> Result<ExitCode, Box<dyn std::error::Error>> {
 
     if args == [OsString::from("privacy")] {
         println!(
-            "fastjj {} (jj 0.29.0)\nProcess privacy: enforced by {}\nChild processes and exec: denied\nWorker threads: allowed\nGit transport: in-process libgit2\nPrivate request mode: fastjj --request-stdin",
+            "fastjj {} (jj 0.37.0)\nProcess privacy: enforced by {}\nChild processes and exec: denied\nWorker threads: allowed\nGit transport: in-process libgit2\nPrivate request modes: --request-stdin, --request-fd",
             env!("CARGO_PKG_VERSION"),
             privacy::enforcement_name()
         );
+        return Ok(ExitCode::SUCCESS);
+    }
+    if args.len() == 2 && args[0] == "--edit-file" {
+        editor::edit(std::path::Path::new(&args[1]))?;
         return Ok(ExitCode::SUCCESS);
     }
 
     Ok(CliRunner::init()
         .name("fastjj")
         .about("A process-private Jujutsu client. Use --request-stdin for private JSON arguments; fastjj privacy explains the enforced policy.")
-        .version(concat!(env!("CARGO_PKG_VERSION"), " (jj 0.29.0)"))
+        .version(concat!(env!("CARGO_PKG_VERSION"), " (jj 0.37.0)"))
         .with_args(request::jj_args(args))
         .with_config_overrides(request::PRIVACY_CONFIG)
         .add_dispatch_hook(|ui, command, dispatch| {
@@ -55,7 +80,7 @@ fn run() -> Result<ExitCode, Box<dyn std::error::Error>> {
             }
             dispatch(ui, command)
         })
-        .run())
+        .run().into())
 }
 
 fn main() -> ExitCode {

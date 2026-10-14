@@ -18,13 +18,15 @@ use clap_complete::ArgValueCompleter;
 use itertools::Itertools as _;
 use jj_lib::merge::Merge;
 use jj_lib::merged_tree::MergedTreeBuilder;
-use jj_lib::repo::Repo as _;
+use pollster::FutureExt as _;
 use tracing::instrument;
 
-use crate::cli_util::print_snapshot_stats;
 use crate::cli_util::CommandHelper;
-use crate::command_error::user_error_with_hint;
+use crate::cli_util::export_working_copy_changes_to_git;
+use crate::cli_util::print_snapshot_stats;
+use crate::cli_util::print_unmatched_explicit_paths;
 use crate::command_error::CommandError;
+use crate::command_error::user_error_with_hint;
 use crate::complete;
 use crate::ui::Ui;
 
@@ -34,13 +36,9 @@ pub(crate) struct FileUntrackArgs {
     /// Paths to untrack. They must already be ignored.
     ///
     /// The paths could be ignored via a .gitignore or .git/info/exclude (in
-    /// colocated repos).
-    #[arg(
-        required = true,
-        value_name = "FILESETS",
-        value_hint = clap::ValueHint::AnyPath,
-        add = ArgValueCompleter::new(complete::all_revision_files),
-    )]
+    /// colocated workspaces).
+    #[arg(required = true, value_name = "FILESETS", value_hint = clap::ValueHint::AnyPath)]
+    #[arg(add = ArgValueCompleter::new(complete::all_revision_files))]
     paths: Vec<String>,
 }
 
@@ -51,36 +49,35 @@ pub(crate) fn cmd_file_untrack(
     args: &FileUntrackArgs,
 ) -> Result<(), CommandError> {
     let mut workspace_command = command.workspace_helper(ui)?;
-    let store = workspace_command.repo().store().clone();
-    let matcher = workspace_command
-        .parse_file_patterns(ui, &args.paths)?
-        .to_matcher();
+    let fileset_expression = workspace_command.parse_file_patterns(ui, &args.paths)?;
+    let matcher = fileset_expression.to_matcher();
     let auto_tracking_matcher = workspace_command.auto_tracking_matcher(ui)?;
     let options =
         workspace_command.snapshot_options_with_start_tracking_matcher(&auto_tracking_matcher)?;
 
+    let working_copy_shared_with_git = workspace_command.working_copy_shared_with_git();
+
     let mut tx = workspace_command.start_transaction().into_inner();
     let (mut locked_ws, wc_commit) = workspace_command.start_working_copy_mutation()?;
     // Create a new tree without the unwanted files
-    let mut tree_builder = MergedTreeBuilder::new(wc_commit.tree_id().clone());
-    let wc_tree = wc_commit.tree()?;
+    let mut tree_builder = MergedTreeBuilder::new(wc_commit.tree());
+    let wc_tree = wc_commit.tree();
     for (path, _value) in wc_tree.entries_matching(matcher.as_ref()) {
         tree_builder.set_or_remove(path, Merge::absent());
     }
-    let new_tree_id = tree_builder.write_tree(&store)?;
+    let new_tree = tree_builder.write_tree()?;
     let new_commit = tx
         .repo_mut()
         .rewrite_commit(&wc_commit)
-        .set_tree_id(new_tree_id)
+        .set_tree(new_tree)
         .write()?;
     // Reset the working copy to the new commit
-    locked_ws.locked_wc().reset(&new_commit)?;
+    locked_ws.locked_wc().reset(&new_commit).block_on()?;
     // Commit the working copy again so we can inform the user if paths couldn't be
     // untracked because they're not ignored.
-    let (wc_tree_id, stats) = locked_ws.locked_wc().snapshot(&options)?;
-    if wc_tree_id != *new_commit.tree_id() {
-        let wc_tree = store.get_root_tree(&wc_tree_id)?;
-        let added_back = wc_tree.entries_matching(matcher.as_ref()).collect_vec();
+    let (new_wc_tree, stats) = locked_ws.locked_wc().snapshot(&options).block_on()?;
+    if new_wc_tree.tree_ids() != new_commit.tree_ids() {
+        let added_back = new_wc_tree.entries_matching(matcher.as_ref()).collect_vec();
         if !added_back.is_empty() {
             drop(locked_ws);
             let path = &added_back[0].0;
@@ -102,15 +99,19 @@ Make sure they're ignored, then try again.",
         } else {
             // This means there were some concurrent changes made in the working copy. We
             // don't want to mix those in, so reset the working copy again.
-            locked_ws.locked_wc().reset(&new_commit)?;
+            locked_ws.locked_wc().reset(&new_commit).block_on()?;
         }
     }
     let num_rebased = tx.repo_mut().rebase_descendants()?;
     if num_rebased > 0 {
         writeln!(ui.status(), "Rebased {num_rebased} descendant commits")?;
     }
+    if working_copy_shared_with_git {
+        export_working_copy_changes_to_git(ui, tx.repo_mut(), &wc_tree, &new_commit.tree())?;
+    }
     let repo = tx.commit("untrack paths")?;
     locked_ws.finish(repo.op_id().clone())?;
+    print_unmatched_explicit_paths(ui, &workspace_command, &fileset_expression, [&wc_tree])?;
     print_snapshot_stats(ui, &stats, workspace_command.env().path_converter())?;
     Ok(())
 }

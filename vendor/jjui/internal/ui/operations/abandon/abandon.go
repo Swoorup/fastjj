@@ -1,0 +1,231 @@
+package abandon
+
+import (
+	"strings"
+
+	tea "charm.land/bubbletea/v2"
+	"charm.land/lipgloss/v2"
+	"github.com/idursun/jjui/internal/jj"
+	"github.com/idursun/jjui/internal/parser"
+	"github.com/idursun/jjui/internal/screen"
+	"github.com/idursun/jjui/internal/ui/actions"
+	"github.com/idursun/jjui/internal/ui/common"
+	"github.com/idursun/jjui/internal/ui/context"
+	"github.com/idursun/jjui/internal/ui/intents"
+	"github.com/idursun/jjui/internal/ui/layout"
+	"github.com/idursun/jjui/internal/ui/operations"
+	"github.com/idursun/jjui/internal/ui/render"
+	"github.com/idursun/jjui/internal/ui/theme"
+)
+
+var (
+	_ operations.Operation       = (*Operation)(nil)
+	_ operations.SegmentRenderer = (*Operation)(nil)
+	_ common.Focusable           = (*Operation)(nil)
+	_ common.ScopeProvider       = (*Operation)(nil)
+)
+
+type selectionType int
+
+const (
+	selectionTypeRevision selectionType = iota
+	selectionTypeDescendants
+)
+
+type selections struct {
+	items map[string]selectionType
+}
+
+type Operation struct {
+	context           *context.MainContext
+	selectedRevisions jj.SelectedRevisions
+	selections        selections
+	current           *jj.Commit
+}
+
+type addSelectionMsg struct {
+	jj.SelectedRevisions
+}
+
+func (a *Operation) IsFocused() bool {
+	return true
+}
+
+func (a *Operation) Scopes() []common.Scope {
+	return []common.Scope{
+		{
+			Name:    actions.ScopeAbandon,
+			Leak:    common.LeakAll,
+			Handler: a,
+		},
+	}
+}
+
+func (a *Operation) Init() tea.Cmd {
+	return nil
+}
+
+func (a *Operation) Update(msg tea.Msg) tea.Cmd {
+	switch msg := msg.(type) {
+	case intents.Intent:
+		cmd, _ := a.HandleIntent(msg)
+		return cmd
+	case common.SelectionChangedMsg:
+		selected, ok := msg.Item.(common.SelectedRevision)
+		if !ok {
+			return nil
+		}
+		return a.setSelectedRevision(&jj.Commit{ChangeId: selected.ChangeId, CommitId: selected.CommitId})
+	case addSelectionMsg:
+		a.selectedRevisions = msg.SelectedRevisions
+	}
+	return nil
+}
+
+func (a *Operation) ViewRect(_ *render.DisplayContext, _ layout.Box) {}
+
+func (a *Operation) HandleIntent(intent intents.Intent) (tea.Cmd, bool) {
+	switch intent := intent.(type) {
+	case intents.StartAceJump:
+		return common.StartAceJump(), true
+	case intents.Apply:
+		if len(a.selectedRevisions.Revisions) == 0 {
+			return nil, true
+		}
+		return a.context.RunCommand(jj.Abandon(a.selectedRevisions, intent.Force), common.Refresh, common.CloseApplied), true
+	case intents.AbandonToggleSelect:
+		if a.current == nil {
+			return nil, true
+		}
+		a.selections.toggle(a.current.GetChangeId(), selectionTypeRevision)
+		return a.refreshSelectedRevisionsCmd(), true
+	case intents.AbandonSelectDescendants:
+		if a.current == nil {
+			return nil, true
+		}
+		a.selections.toggle(a.current.GetChangeId(), selectionTypeDescendants)
+		return a.refreshSelectedRevisionsCmd(), true
+	case intents.Cancel:
+		return common.Close, true
+	}
+	return nil, false
+}
+
+func (a *Operation) setSelectedRevision(commit *jj.Commit) tea.Cmd {
+	if a.current.Equal(commit) {
+		return nil
+	}
+	a.current = commit
+	return nil
+}
+
+func (a *Operation) Render(commit *jj.Commit, pos operations.RenderPosition) string {
+	if pos != operations.RenderBeforeChangeId {
+		return ""
+	}
+
+	sourceMarkerStyle := theme.DefaultPalette.Get("abandon", "", "source_marker", false)
+	if a.selections.has(commit.GetChangeId(), selectionTypeDescendants) {
+		return sourceMarkerStyle.Render("<< abandon descendants of >>")
+	}
+	if a.selections.has(commit.GetChangeId(), selectionTypeRevision) {
+		return sourceMarkerStyle.Render("<< abandon >>")
+	}
+	return ""
+}
+
+func (a *Operation) RenderSegment(currentStyle lipgloss.Style, segment *screen.Segment, row parser.Row) string {
+	if row.Commit == nil || !a.selectedRevisions.Contains(row.Commit) {
+		return ""
+	}
+	return currentStyle.Strikethrough(true).Render(segment.Text)
+}
+
+func (a *Operation) refreshSelectedRevisionsCmd() tea.Cmd {
+	revset := a.selections.revset()
+	if revset == "" {
+		a.selectedRevisions = jj.NewSelectedRevisions()
+		return nil
+	}
+	return func() tea.Msg {
+		bytes, err := a.context.RunCommandImmediate(jj.GetIdsFromRevset(revset))
+		if err != nil {
+			return common.CommandCompletedMsg{Err: err}
+		}
+		return addSelectionMsg{selectedRevisionsFromOutput(bytes)}
+	}
+}
+
+func (a *Operation) Name() string {
+	return "abandon"
+}
+
+func NewOperation(context *context.MainContext, selectedRevisions jj.SelectedRevisions, current *jj.Commit) *Operation {
+	selectionItems := make(map[string]selectionType, len(selectedRevisions.Revisions))
+	for _, revision := range selectedRevisions.Revisions {
+		if revision == nil {
+			continue
+		}
+		changeId := revision.GetChangeId()
+		if changeId == "" {
+			continue
+		}
+		selectionItems[changeId] = selectionTypeRevision
+	}
+	return &Operation{
+		context:           context,
+		selectedRevisions: selectedRevisions,
+		selections:        selections{items: selectionItems},
+		current:           current,
+	}
+}
+
+func (s *selections) toggle(changeId string, t selectionType) {
+	if changeId == "" {
+		return
+	}
+	if s.items == nil {
+		s.items = make(map[string]selectionType)
+	}
+	if existing, ok := s.items[changeId]; ok && existing == t {
+		delete(s.items, changeId)
+		return
+	}
+	s.items[changeId] = t
+}
+
+func (s *selections) revset() string {
+	parts := make([]string, 0, len(s.items))
+	for changeId, t := range s.items {
+		if changeId == "" {
+			continue
+		}
+		if t == selectionTypeDescendants {
+			parts = append(parts, changeId+"::")
+			continue
+		}
+		parts = append(parts, changeId)
+	}
+	return strings.Join(parts, " | ")
+}
+
+func (s *selections) has(changeId string, t selectionType) bool {
+	if s.items == nil {
+		return false
+	}
+	selectedType, ok := s.items[changeId]
+	return ok && selectedType == t
+}
+
+func selectedRevisionsFromOutput(output []byte) jj.SelectedRevisions {
+	trimmed := strings.TrimSpace(string(output))
+	if trimmed == "" {
+		return jj.NewSelectedRevisions()
+	}
+	ids := strings.Split(trimmed, "\n")
+	revisions := make([]*jj.Commit, 0, len(ids))
+	for _, id := range ids {
+		revisions = append(revisions, &jj.Commit{ChangeId: id})
+	}
+	return jj.NewSelectedRevisions(revisions...)
+}

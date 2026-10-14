@@ -1,0 +1,757 @@
+package git
+
+import (
+	"fmt"
+	"slices"
+	"strings"
+
+	"charm.land/bubbles/v2/textinput"
+	tea "charm.land/bubbletea/v2"
+	"charm.land/lipgloss/v2"
+	"github.com/idursun/jjui/internal/jj"
+	"github.com/idursun/jjui/internal/ui/actions"
+	"github.com/idursun/jjui/internal/ui/common"
+	"github.com/idursun/jjui/internal/ui/context"
+	"github.com/idursun/jjui/internal/ui/intents"
+	"github.com/idursun/jjui/internal/ui/layout"
+	"github.com/idursun/jjui/internal/ui/render"
+	"github.com/idursun/jjui/internal/ui/theme"
+)
+
+type itemCategory string
+
+const (
+	itemCategoryPush  itemCategory = "push"
+	itemCategoryFetch itemCategory = "fetch"
+)
+
+// SelectRemoteMsg is sent when a remote is clicked
+type SelectRemoteMsg struct {
+	Index int
+}
+
+type item struct {
+	category itemCategory
+	name     string
+	desc     string
+	command  []string
+	key      string
+}
+
+func (i item) FilterValue() string {
+	return i.name
+}
+
+func (i item) Title() string {
+	return i.name
+}
+
+func (i item) Description() string {
+	return i.desc
+}
+
+func (i item) ShortCut() string {
+	return i.key
+}
+
+type itemClickMsg struct {
+	Index int
+}
+
+type itemScrollMsg struct {
+	Delta      int
+	Horizontal bool
+}
+
+func (m itemScrollMsg) SetDelta(delta int, horizontal bool) tea.Msg {
+	m.Delta = delta
+	m.Horizontal = horizontal
+	return m
+}
+
+type filterState int
+
+const (
+	filterOff filterState = iota
+	filterEditing
+	filterApplied
+)
+
+var _ common.ImmediateModel = (*Model)(nil)
+var _ common.Focusable = (*Model)(nil)
+var _ common.Editable = (*Model)(nil)
+
+type Model struct {
+	context             *context.MainContext
+	items               []item
+	filteredItems       []item
+	cursor              int
+	listRenderer        *render.ListRenderer
+	filterInput         textinput.Model
+	filterState         filterState
+	filterText          string
+	categoryFilter      string
+	ensureCursorVisible bool
+	revisions           jj.SelectedRevisions
+	remoteNames         []string
+	selectedRemoteIdx   int
+	title               string
+}
+
+func (m *Model) IsFocused() bool {
+	return m.filterState == filterEditing
+}
+
+func (m *Model) IsEditing() bool {
+	return m.filterState == filterEditing
+}
+
+func (m *Model) Scopes() []common.Scope {
+	if m.IsEditing() {
+		return []common.Scope{
+			{
+				Name:    actions.ScopeGit + ".filter",
+				Leak:    common.LeakNone,
+				Handler: m,
+			},
+			{
+				Name:    actions.ScopeGit,
+				Leak:    common.LeakNone,
+				Handler: m,
+			},
+		}
+	}
+	return []common.Scope{
+		{
+			Name:    actions.ScopeGit,
+			Leak:    common.LeakGlobal,
+			Handler: m,
+		},
+	}
+}
+
+func (m *Model) Init() tea.Cmd {
+	return nil
+}
+
+func (m *Model) cycleRemotes(step int) tea.Cmd {
+	if len(m.remoteNames) == 0 {
+		return nil
+	}
+
+	m.selectedRemoteIdx += step
+	if m.selectedRemoteIdx >= len(m.remoteNames) {
+		m.selectedRemoteIdx = 0
+	} else if m.selectedRemoteIdx < 0 {
+		m.selectedRemoteIdx = len(m.remoteNames) - 1
+	}
+
+	// Remotes are rendered via TextBuilder in ViewRect
+	m.items = m.createMenuItems()
+	m.applyFilters(false)
+	return nil
+}
+
+func (m *Model) Update(msg tea.Msg) tea.Cmd {
+	switch msg := msg.(type) {
+	case itemClickMsg:
+		items := m.visibleItems()
+		if msg.Index >= 0 && msg.Index < len(items) {
+			m.cursor = msg.Index
+			m.ensureCursorVisible = true
+		}
+	case itemScrollMsg:
+		if msg.Horizontal {
+			return nil
+		}
+		m.ensureCursorVisible = false
+		m.listRenderer.StartLine += msg.Delta
+		if m.listRenderer.StartLine < 0 {
+			m.listRenderer.StartLine = 0
+		}
+	case SelectRemoteMsg:
+		if msg.Index >= 0 && msg.Index < len(m.remoteNames) {
+			m.selectedRemoteIdx = msg.Index
+			m.items = m.createMenuItems()
+			m.applyFilters(false)
+		}
+		return nil
+	case intents.Intent:
+		cmd, _ := m.HandleIntent(msg)
+		return cmd
+	case tea.KeyMsg, tea.PasteMsg:
+		if m.filterState == filterEditing {
+			updated, cmd := m.filterInput.Update(msg)
+			filterChanged := m.filterInput.Value() != updated.Value()
+			m.filterInput = updated
+			if filterChanged {
+				m.applyFilters(false)
+			}
+			return cmd
+		}
+		keyMsg, ok := msg.(tea.KeyMsg)
+		if !ok {
+			return nil
+		}
+		if cmd, handled := m.HandleIntent(intents.GitApplyShortcut{Key: keyMsg.String()}); handled && cmd != nil {
+			return cmd
+		}
+	}
+	return nil
+}
+
+func (m *Model) HandleIntent(intent intents.Intent) (tea.Cmd, bool) {
+	switch msg := intent.(type) {
+	case intents.Apply:
+		if m.filterState == filterEditing {
+			m.filterText = strings.TrimSpace(m.filterInput.Value())
+			if m.filterText == "" {
+				m.filterState = filterOff
+				m.filterInput.SetValue("")
+				m.filterInput.Blur()
+			} else {
+				m.filterState = filterApplied
+				m.filterInput.Blur()
+			}
+			m.applyFilters(true)
+			return nil, true
+		}
+		selected, ok := m.selectedItem()
+		if !ok {
+			return nil, true
+		}
+		return tea.Sequence(common.CloseApplied, m.context.RunCommand(jj.Args(selected.command...), common.Refresh)), true
+	case intents.GitFilter:
+		filter := string(msg.Kind)
+		if filter == "" {
+			return nil, true
+		}
+		if m.categoryFilter == filter {
+			return m.executeDefaultForFilter(msg.Kind), true
+		}
+		m.categoryFilter = filter
+		m.applyFilters(true)
+		return nil, true
+	case intents.GitCycleRemotes:
+		return m.cycleRemotes(msg.Delta), true
+	case intents.GitOpenFilter:
+		m.filterState = filterEditing
+		m.filterInput.Focus()
+		m.filterInput.CursorEnd()
+		return textinput.Blink, true
+	case intents.GitNavigate:
+		if msg.IsPage {
+			m.ensureCursorVisible = false
+			m.listRenderer.StartLine += msg.Delta * m.itemHeight()
+			return nil, true
+		}
+		m.moveCursor(msg.Delta)
+		return nil, true
+	case intents.Cancel:
+		if m.filterState == filterEditing {
+			m.resetTextFilter()
+			return nil, true
+		}
+		if m.hasActiveFilter() {
+			m.resetAllFilters()
+			return nil, true
+		}
+		return common.Close, true
+	case intents.GitApplyShortcut:
+		if m.categoryFilter == "" {
+			return nil, true
+		}
+		for _, listItem := range m.visibleItems() {
+			if listItem.key == msg.Key {
+				return tea.Sequence(common.CloseApplied, m.context.RunCommand(jj.Args(listItem.command...), common.Refresh)), true
+			}
+		}
+		return nil, true
+	}
+	return nil, false
+}
+
+func (m *Model) executeDefaultForFilter(kind intents.GitFilterKind) tea.Cmd {
+	selectedRemote := ""
+	if len(m.remoteNames) > 0 && m.selectedRemoteIdx >= 0 && m.selectedRemoteIdx < len(m.remoteNames) {
+		selectedRemote = m.remoteNames[m.selectedRemoteIdx]
+	}
+
+	defaultCommandByKind := map[intents.GitFilterKind][]string{
+		intents.GitFilterPush:  jj.GitPush("--remote", selectedRemote),
+		intents.GitFilterFetch: jj.GitFetch("--remote", selectedRemote),
+	}
+
+	defaultCommand, ok := defaultCommandByKind[kind]
+	if ok {
+		for _, listItem := range m.visibleItems() {
+			if slices.Equal(listItem.command, defaultCommand) {
+				return tea.Sequence(common.CloseApplied, m.context.RunCommand(jj.Args(listItem.command...), common.Refresh))
+			}
+		}
+	}
+
+	if selected, ok := m.selectedItem(); ok {
+		return tea.Sequence(common.CloseApplied, m.context.RunCommand(jj.Args(selected.command...), common.Refresh))
+	}
+
+	for _, listItem := range m.visibleItems() {
+		if string(listItem.category) == string(kind) {
+			return tea.Sequence(common.CloseApplied, m.context.RunCommand(jj.Args(listItem.command...), common.Refresh))
+		}
+	}
+	return nil
+}
+
+func (m *Model) ViewRect(dl *render.DisplayContext, box layout.Box) {
+	menuTitleStyle := theme.DefaultPalette.Get("git", "", "title", false)
+	menuTextStyle := theme.DefaultPalette.Get("git", "", "text", false)
+	inputTextStyle := theme.DefaultPalette.Get("git", "input", "text", false)
+	inputMatchedStyle := theme.DefaultPalette.Get("git", "input", "matched", false)
+	borderStyle := theme.DefaultPalette.GetBorder("git", "", "border", false, lipgloss.NormalBorder())
+
+	pw, ph := box.R.Dx(), box.R.Dy()
+	contentWidth := max(min(pw, 80)-4, 0)
+	contentHeight := max(min(ph, 40)-4, 0)
+	menuWidth := max(contentWidth+2, 0)
+	menuHeight := max(contentHeight+2, 0)
+	frame := box.Center(menuWidth, menuHeight)
+	if frame.R.Dx() <= 0 || frame.R.Dy() <= 0 {
+		return
+	}
+
+	dl.AddBackdrop(box.R, render.ZMenuBorder-1)
+	contentBox := frame.Inset(1)
+	if contentBox.R.Dx() <= 0 || contentBox.R.Dy() <= 0 {
+		return
+	}
+	dl.AddFill(contentBox.R, ' ', menuTextStyle, render.ZMenuContent)
+
+	borderBase := lipgloss.NewStyle().Width(contentBox.R.Dx()).Height(contentBox.R.Dy()).Render("")
+	dl.AddDraw(frame.R, borderStyle.Render(borderBase), render.ZMenuBorder)
+
+	titleBox, contentBox := contentBox.CutTop(1)
+	dl.
+		Text(titleBox.R.Min.X, titleBox.R.Min.Y, render.ZMenuContent).
+		Styled(m.title, menuTitleStyle).
+		Done()
+
+	_, contentBox = contentBox.CutTop(1)
+	remoteBox, contentBox := contentBox.CutTop(1)
+	m.renderRemotes(dl, remoteBox)
+
+	_, contentBox = contentBox.CutTop(1)
+	filterBox, contentBox := contentBox.CutTop(1)
+	if m.filterState == filterEditing {
+		gfis := m.filterInput.Styles()
+		gfis.Focused.Prompt = inputMatchedStyle.PaddingLeft(1)
+		gfis.Focused.Text = inputTextStyle
+		gfis.Blurred.Prompt = inputMatchedStyle.PaddingLeft(1)
+		gfis.Blurred.Text = inputTextStyle
+		m.filterInput.SetStyles(gfis)
+		m.filterInput.SetWidth(max(contentBox.R.Dx()-2, 0))
+		dl.AddDraw(filterBox.R, m.filterInput.View(), render.ZMenuContent)
+		dl.SetCursorInRect(m.filterInput.Cursor(), filterBox.R, 0, 0)
+	} else {
+		m.renderFilterView(dl, filterBox)
+	}
+
+	_, listBox := contentBox.CutTop(1)
+	m.renderList(dl, listBox)
+}
+
+func (m *Model) renderRemotes(dl *render.DisplayContext, lineBox layout.Box) {
+	if lineBox.R.Dx() <= 0 || lineBox.R.Dy() <= 0 {
+		return
+	}
+
+	remotePromptStyle := theme.DefaultPalette.Get("git", "remote", "title", false)
+	remoteTextStyle := theme.DefaultPalette.Get("git", "remote", "text", false)
+	remoteDimmedStyle := theme.DefaultPalette.Get("git", "remote", "dimmed", false)
+	remoteSelectedStyle := theme.DefaultPalette.GetBlended("git", "remote", "", true)
+	noRemoteStyle := theme.DefaultPalette.Get("git", "remote", "error", false)
+
+	dl.AddFill(lineBox.R, ' ', remoteTextStyle, render.ZMenuContent)
+
+	// Render above menu content
+	tb := dl.Text(lineBox.R.Min.X, lineBox.R.Min.Y, render.ZMenuContent+1).
+		Styled(" ", remoteTextStyle).
+		Styled("Remotes: ", remotePromptStyle)
+
+	if len(m.remoteNames) == 0 {
+		tb.Styled("NO REMOTE FOUND", noRemoteStyle).Done()
+		return
+	}
+
+	for idx, remoteName := range m.remoteNames {
+		style := remoteDimmedStyle
+		if idx == m.selectedRemoteIdx {
+			style = remoteSelectedStyle
+		}
+		tb.Clickable(remoteName, style, SelectRemoteMsg{Index: idx}).Styled(" ", remoteTextStyle)
+	}
+
+	tb.Done()
+}
+
+func loadBookmarks(c context.CommandRunner, changeId string) []jj.Bookmark {
+	bytes, _ := c.RunCommandImmediate(jj.BookmarkList(changeId))
+	bookmarks := jj.ParseBookmarkListOutput(string(bytes))
+	return bookmarks
+}
+
+func loadRemoteNames(c context.CommandRunner) []string {
+	bytes, _ := c.RunCommandImmediate(jj.GitRemoteList())
+	remotes := jj.ParseRemoteListOutput(string(bytes))
+	return remotes
+}
+
+func NewModel(c *context.MainContext, revisions jj.SelectedRevisions) *Model {
+	remotes := loadRemoteNames(c)
+
+	m := &Model{
+		context:           c,
+		revisions:         revisions,
+		remoteNames:       remotes,
+		selectedRemoteIdx: 0,
+		listRenderer:      render.NewListRenderer(itemScrollMsg{}),
+		title:             "Git Operations",
+	}
+	m.listRenderer.Z = render.ZMenuContent
+
+	items := m.createMenuItems()
+	m.items = items
+	m.filteredItems = items
+	m.filterInput = textinput.New()
+	m.filterInput.Prompt = "Filter: "
+	m.filterInput.SetVirtualCursor(false)
+	m.applyFilters(true)
+
+	return m
+}
+
+func (m *Model) visibleItems() []item {
+	return m.filteredItems
+}
+
+func (m *Model) selectedItem() (item, bool) {
+	items := m.visibleItems()
+	if m.cursor < 0 || m.cursor >= len(items) {
+		return item{}, false
+	}
+	return items[m.cursor], true
+}
+
+func (m *Model) itemHeight() int {
+	return 3
+}
+
+func (m *Model) moveCursor(delta int) {
+	items := m.visibleItems()
+	if len(items) == 0 {
+		m.cursor = 0
+		return
+	}
+	next := m.cursor + delta
+	if next < 0 {
+		next = 0
+	} else if next >= len(items) {
+		next = len(items) - 1
+	}
+	if next != m.cursor {
+		m.cursor = next
+		m.ensureCursorVisible = true
+	}
+}
+
+func (m *Model) hasActiveFilter() bool {
+	return m.categoryFilter != "" || m.currentFilterText() != ""
+}
+
+func (m *Model) currentFilterText() string {
+	if m.filterState == filterEditing {
+		return strings.TrimSpace(m.filterInput.Value())
+	}
+	return strings.TrimSpace(m.filterText)
+}
+
+func (m *Model) resetTextFilter() {
+	m.filterInput.SetValue("")
+	m.filterText = ""
+	m.filterState = filterOff
+	m.filterInput.Blur()
+	m.applyFilters(true)
+}
+
+func (m *Model) resetAllFilters() {
+	m.categoryFilter = ""
+	m.resetTextFilter()
+}
+
+func (m *Model) applyFilters(resetCursor bool) {
+	items := m.items
+	if m.categoryFilter != "" {
+		filtered := make([]item, 0, len(items))
+		for _, item := range items {
+			if item.category == itemCategory(m.categoryFilter) {
+				filtered = append(filtered, item)
+			}
+		}
+		items = filtered
+	}
+
+	filterText := m.currentFilterText()
+	if filterText != "" {
+		filtered := make([]item, 0, len(items))
+		for _, item := range items {
+			if strings.Contains(strings.ToLower(item.FilterValue()), strings.ToLower(filterText)) {
+				filtered = append(filtered, item)
+			}
+		}
+		items = filtered
+	}
+
+	m.filteredItems = items
+	if resetCursor || m.cursor >= len(m.filteredItems) {
+		m.cursor = 0
+	}
+	m.listRenderer.StartLine = 0
+}
+
+func (m *Model) renderFilterView(dl *render.DisplayContext, box layout.Box) {
+	if box.R.Dx() <= 0 || box.R.Dy() <= 0 {
+		return
+	}
+	width := box.R.Dx()
+	menuTextStyle := theme.DefaultPalette.Get("git", "", "text", false)
+	menuMatchedStyle := theme.DefaultPalette.Get("git", "", "matched", false)
+	filterStyle := menuTextStyle.PaddingLeft(1)
+	filterValueStyle := menuMatchedStyle
+
+	filterView := lipgloss.JoinHorizontal(0, filterStyle.Render("Showing "), filterValueStyle.Render("all"))
+	if m.categoryFilter != "" {
+		filterView = lipgloss.JoinHorizontal(0, filterStyle.Render("Showing only "), filterValueStyle.Render(m.categoryFilter))
+	}
+	dl.AddDraw(box.R, menuTextStyle.Width(width).Render(filterView), render.ZMenuContent)
+}
+
+func (m *Model) renderList(dl *render.DisplayContext, listBox layout.Box) {
+	if listBox.R.Dx() <= 0 || listBox.R.Dy() <= 0 {
+		return
+	}
+
+	listWidth := max(listBox.R.Dx()-2, 0)
+	items := m.visibleItems()
+	itemCount := len(items)
+	if itemCount == 0 {
+		return
+	}
+
+	itemHeight := m.itemHeight()
+	m.listRenderer.StartLine = render.ClampStartLine(m.listRenderer.StartLine, listBox.R.Dy(), itemCount*itemHeight)
+	m.listRenderer.Render(
+		dl,
+		listBox,
+		itemCount,
+		m.cursor,
+		m.ensureCursorVisible,
+		func(_ int) int { return itemHeight },
+		func(dl *render.DisplayContext, index int, rect layout.Rectangle) {
+			if index < 0 || index >= itemCount {
+				return
+			}
+			renderItem(dl, rect, listWidth, m.categoryFilter != "", m.cursor, index, items[index])
+		},
+		func(index int, _ tea.Mouse) tea.Msg { return itemClickMsg{Index: index} },
+	)
+	m.listRenderer.RegisterScroll(dl, listBox)
+	m.ensureCursorVisible = false
+}
+
+func renderItem(dl *render.DisplayContext, rect layout.Rectangle, width int, showShortcuts bool, cursor int, index int, item item) {
+	var (
+		title string
+		desc  string
+	)
+	title = item.Title()
+	desc = item.Description()
+	shortcut := ""
+	if showShortcuts {
+		shortcut = item.ShortCut()
+	}
+	if width <= 0 {
+		return
+	}
+
+	if len(title) > width {
+		title = title[:width-1] + "…"
+	}
+
+	if len(desc) > width {
+		desc = desc[:width-1] + "…"
+	}
+
+	isSelected := index == cursor
+	getStyle := theme.DefaultPalette.Get
+	if isSelected {
+		getStyle = theme.DefaultPalette.GetBlended
+	}
+	textStyle := getStyle("git", "", "text", isSelected)
+	descStyle := getStyle("git", "", "dimmed", isSelected)
+	shortcutStyle := getStyle("git", "", "shortcut", isSelected)
+
+	titleLine := ""
+	if shortcut != "" {
+		titleLine = lipgloss.JoinHorizontal(0, shortcutStyle.PaddingLeft(1).Render(shortcut), textStyle.PaddingLeft(1).Render(title))
+	} else {
+		titleLine = textStyle.PaddingLeft(1).Render(title)
+	}
+	titleLine = lipgloss.PlaceHorizontal(width+2, 0, titleLine, lipgloss.WithWhitespaceStyle(textStyle))
+
+	descStyle = descStyle.PaddingLeft(1).PaddingRight(1).Width(width + 2)
+	descLine := descStyle.Render(desc)
+	descLine = lipgloss.PlaceHorizontal(width+2, 0, descLine, lipgloss.WithWhitespaceStyle(textStyle))
+
+	spacerLine := textStyle.Width(width + 2).Render("")
+	content := lipgloss.JoinVertical(lipgloss.Left, titleLine, descLine, spacerLine)
+	if content == "" {
+		return
+	}
+	dl.AddDraw(rect, content, render.ZMenuContent)
+}
+
+func (m *Model) createMenuItems() []item {
+	revisions := m.revisions
+	var items []item
+	hasRemote := len(m.remoteNames) > 0
+	var selectedRemote string
+	if hasRemote {
+		selectedRemote = m.remoteNames[m.selectedRemoteIdx]
+	} else {
+		// set selectedRemote to empty string and `git` command fails gracefully
+		selectedRemote = ""
+	}
+
+	var selectedBookmarks []string
+	seenBookmarks := make(map[string]bool)
+	for _, commit := range revisions.Revisions {
+		bookmarks := loadBookmarks(m.context, commit.GetChangeId())
+		for _, b := range bookmarks {
+			if b.Conflict {
+				continue
+			}
+			pushable := b.Local != nil && (len(b.Remotes) == 0 || b.HasTrackedRemote(selectedRemote))
+			if pushable && !seenBookmarks[b.Name] {
+				seenBookmarks[b.Name] = true
+				selectedBookmarks = append(selectedBookmarks, b.Name)
+			}
+			for _, remote := range b.Remotes {
+				items = append(items, item{
+					name:     fmt.Sprintf("git push --bookmark %s --remote %s", b.Name, remote.Remote),
+					desc:     fmt.Sprintf("Git push bookmark %s to %s", b.Name, remote.Remote),
+					command:  jj.GitPush("--bookmark", b.Name, "--remote", remote.Remote),
+					category: itemCategoryPush,
+				})
+			}
+		}
+	}
+	items = append(items,
+		item{
+			name:     fmt.Sprintf("git push --remote %s", selectedRemote),
+			desc:     "Push tracking bookmarks in the current revset",
+			command:  jj.GitPush("--remote", selectedRemote),
+			category: itemCategoryPush,
+			key:      "p",
+		},
+		item{
+			name:     fmt.Sprintf("git push --all --deleted --remote %s", selectedRemote),
+			desc:     "Push all bookmarks (including new and deleted bookmarks)",
+			command:  jj.GitPush("--all", "--deleted", "--remote", selectedRemote),
+			category: itemCategoryPush,
+			key:      "a",
+		},
+	)
+
+	hasMultipleRevisions := len(revisions.Revisions) > 1
+
+	if hasMultipleRevisions {
+		flags := []string{"--remote", selectedRemote}
+		flags = append(flags, revisions.AsPrefixedArgs("--change")...)
+		items = append(items,
+			item{
+				category: itemCategoryPush,
+				name:     fmt.Sprintf("git push %s", strings.Join(revisions.AsPrefixedArgs("--change"), " ")),
+				desc:     fmt.Sprintf("Push selected changes (%s)", strings.Join(revisions.GetIds(), " ")),
+				command:  jj.GitPush(flags...),
+				key:      "c",
+			})
+	}
+
+	if len(selectedBookmarks) > 0 {
+		var bookmarkFlags []string
+		for _, name := range selectedBookmarks {
+			bookmarkFlags = append(bookmarkFlags, "--bookmark", name)
+		}
+		flags := append([]string{"--remote", selectedRemote}, bookmarkFlags...)
+		items = append(items,
+			item{
+				category: itemCategoryPush,
+				name:     fmt.Sprintf("git push %s --remote %s", strings.Join(bookmarkFlags, " "), selectedRemote),
+				desc:     fmt.Sprintf("Push all bookmarks in selected changes (%s)", strings.Join(selectedBookmarks, ", ")),
+				command:  jj.GitPush(flags...),
+				key:      "b",
+			})
+	}
+
+	for _, commit := range revisions.Revisions {
+		item := item{
+			category: itemCategoryPush,
+			name:     fmt.Sprintf("git push --change %s --remote %s", commit.GetChangeId(), selectedRemote),
+			desc:     fmt.Sprintf("Push the current change (%s)", commit.GetChangeId()),
+			command:  jj.GitPush("--change", commit.GetChangeId(), "--remote", selectedRemote),
+		}
+		if !hasMultipleRevisions {
+			item.key = "c"
+		}
+		items = append(items, item)
+	}
+
+	items = append(items,
+		item{
+			name:     fmt.Sprintf("git push --deleted --remote %s", selectedRemote),
+			desc:     "Push all deleted bookmarks",
+			command:  jj.GitPush("--deleted", "--remote", selectedRemote),
+			category: itemCategoryPush,
+			key:      "d",
+		},
+		item{
+			name:     fmt.Sprintf("git push --tracked --remote %s", selectedRemote),
+			desc:     "Push all tracked bookmarks",
+			command:  jj.GitPush("--tracked", "--remote", selectedRemote),
+			category: itemCategoryPush,
+			key:      "t",
+		},
+		item{
+			name:     fmt.Sprintf("git fetch --remote %s", selectedRemote),
+			desc:     "Fetch from remote",
+			command:  jj.GitFetch("--remote", selectedRemote),
+			category: itemCategoryFetch,
+			key:      "f",
+		},
+		item{
+			name:     fmt.Sprintf("git fetch --tracked --remote %s", selectedRemote),
+			desc:     "Fetch from remote",
+			command:  jj.GitFetch("--tracked", "--remote", selectedRemote),
+			category: itemCategoryFetch, key: "t",
+		},
+		item{
+			name:     "git fetch --all-remotes",
+			desc:     "Fetch from all remotes",
+			command:  jj.GitFetch("--all-remotes"),
+			category: itemCategoryFetch,
+			key:      "a",
+		},
+	)
+
+	return items
+}

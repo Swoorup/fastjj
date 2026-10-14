@@ -1,0 +1,315 @@
+package rebase
+
+import (
+	"fmt"
+	"slices"
+	"strings"
+	"time"
+
+	tea "charm.land/bubbletea/v2"
+	"charm.land/lipgloss/v2"
+	"github.com/idursun/jjui/internal/jj"
+	"github.com/idursun/jjui/internal/jj/source"
+	"github.com/idursun/jjui/internal/ui/actions"
+	"github.com/idursun/jjui/internal/ui/common"
+	"github.com/idursun/jjui/internal/ui/context"
+	"github.com/idursun/jjui/internal/ui/intents"
+	"github.com/idursun/jjui/internal/ui/layout"
+	"github.com/idursun/jjui/internal/ui/operations"
+	"github.com/idursun/jjui/internal/ui/operations/target_picker"
+	"github.com/idursun/jjui/internal/ui/render"
+	"github.com/idursun/jjui/internal/ui/theme"
+)
+
+type Source int
+
+const (
+	SourceRevision Source = iota
+	SourceBranch
+	SourceDescendants
+)
+
+var (
+	sourceToFlags = map[Source]string{
+		SourceBranch:      "--branch",
+		SourceRevision:    "--revisions",
+		SourceDescendants: "--source",
+	}
+	targetToFlags = map[intents.ModeTarget]string{
+		intents.ModeTargetAfter:       "--insert-after",
+		intents.ModeTargetBefore:      "--insert-before",
+		intents.ModeTargetDestination: "--onto",
+	}
+)
+
+var (
+	_ operations.Operation = (*Operation)(nil)
+	_ common.Focusable     = (*Operation)(nil)
+	_ common.ScopeProvider = (*Operation)(nil)
+)
+
+type Operation struct {
+	context        *context.MainContext
+	From           jj.SelectedRevisions
+	InsertStart    *jj.Commit
+	To             *jj.Commit
+	Source         Source
+	Target         intents.ModeTarget
+	targetName     string
+	highlightedIds []string
+	SkipEmptied    bool
+}
+
+type updateHighlightedIdsMsg struct {
+	ids []string
+}
+
+const debounceDuration = 250 * time.Millisecond
+
+func (r *Operation) IsFocused() bool {
+	return true
+}
+
+func (r *Operation) Scopes() []common.Scope {
+	return []common.Scope{
+		{
+			Name:    actions.ScopeRebase,
+			Leak:    common.LeakAll,
+			Handler: r,
+		},
+	}
+}
+
+func (r *Operation) Init() tea.Cmd {
+	return r.refreshHighlightedIds()
+}
+
+func (r *Operation) Update(msg tea.Msg) tea.Cmd {
+	switch msg := msg.(type) {
+	case target_picker.TargetSelectedMsg:
+		r.targetName = strings.TrimSpace(msg.Target)
+		cmd, _ := r.HandleIntent(intents.Apply{Force: msg.Force})
+		return cmd
+	case updateHighlightedIdsMsg:
+		r.highlightedIds = msg.ids
+		return nil
+	case common.SelectionChangedMsg:
+		selected, ok := msg.Item.(common.SelectedRevision)
+		if !ok {
+			return nil
+		}
+		return r.setSelectedRevision(&jj.Commit{ChangeId: selected.ChangeId, CommitId: selected.CommitId})
+	case intents.Intent:
+		cmd, _ := r.HandleIntent(msg)
+		return cmd
+	}
+	return nil
+}
+
+func (r *Operation) HandleIntent(intent intents.Intent) (tea.Cmd, bool) {
+	switch msg := intent.(type) {
+	case intents.StartAceJump:
+		return common.StartAceJump(), true
+	case intents.RebaseSetSource:
+		r.Source = rebaseSourceFromIntent(msg.Source)
+		return nil, true
+	case intents.RebaseSetTarget:
+		r.Target = msg.Target
+		if r.Target == intents.ModeTargetInsert {
+			r.InsertStart = r.To
+		}
+		return nil, true
+	case intents.RebaseOpenTargetPicker:
+		return common.OpenTargetPicker(source.BookmarkSource{}, source.TagSource{}), true
+	case intents.RebaseToggleSkipEmptied:
+		r.SkipEmptied = !r.SkipEmptied
+		return nil, true
+	case intents.Apply:
+		skipEmptied := r.SkipEmptied
+		source := sourceToFlags[r.Source]
+		if r.Target == intents.ModeTargetInsert {
+			insertAfter := r.InsertStart.GetChangeId()
+			insertBefore := r.targetArg()
+			return r.context.RunCommand(jj.RebaseInsert(r.From, source, insertAfter, insertBefore, skipEmptied, msg.Force), common.RefreshAndSelect(r.From.Last()), common.CloseApplied), true
+		}
+		target := targetToFlags[r.Target]
+		return r.context.RunCommand(jj.Rebase(r.From, source, r.targetArg(), target, skipEmptied, msg.Force), common.RefreshAndSelect(r.From.Last()), common.CloseApplied), true
+	case intents.Cancel:
+		return common.Close, true
+	}
+	return nil, false
+}
+
+func rebaseSourceFromIntent(source intents.RebaseSource) Source {
+	switch source {
+	case intents.RebaseSourceRevision:
+		return SourceRevision
+	case intents.RebaseSourceBranch:
+		return SourceBranch
+	case intents.RebaseSourceDescendants:
+		return SourceDescendants
+	default:
+		return SourceRevision
+	}
+}
+
+func (r *Operation) setSelectedRevision(commit *jj.Commit) tea.Cmd {
+	if commit == nil {
+		return nil
+	}
+	if r.To.Equal(commit) {
+		return nil
+	}
+	r.To = commit
+	return r.refreshHighlightedIds()
+}
+
+func (r *Operation) refreshHighlightedIds() tea.Cmd {
+	if r.To == nil {
+		return nil
+	}
+	identifier := fmt.Sprintf("rebase-highlight-%p", r)
+
+	revset := ""
+	switch r.Source {
+	case SourceRevision:
+		r.highlightedIds = r.From.GetIds()
+		return nil
+	case SourceBranch:
+		revset = fmt.Sprintf("(%s..(%s))::", r.To.GetChangeId(), strings.Join(r.From.GetIds(), "|"))
+	case SourceDescendants:
+		revset = fmt.Sprintf("(%s)::", strings.Join(r.From.GetIds(), "|"))
+	}
+
+	return common.Debounce(identifier, debounceDuration, func() tea.Msg {
+		output, err := r.context.RunCommandImmediate(jj.GetIdsFromRevset(revset))
+		if err != nil {
+			return nil
+		}
+		ids := strings.Split(strings.TrimSpace(string(output)), "\n")
+		if len(ids) == 1 && ids[0] == "" {
+			ids = nil
+		}
+		return updateHighlightedIdsMsg{ids: ids}
+	})
+}
+
+func (r *Operation) Render(commit *jj.Commit, pos operations.RenderPosition) string {
+	changeIdStyle := theme.DefaultPalette.Get("rebase", "", "change_id", false)
+	dimmedStyle := theme.DefaultPalette.Get("rebase", "", "dimmed", false)
+	sourceMarkerStyle := theme.DefaultPalette.Get("rebase", "", "source_marker", false)
+	targetMarkerStyle := theme.DefaultPalette.Get("rebase", "", "target_marker", false)
+
+	if pos == operations.RenderBeforeChangeId {
+		changeId := commit.GetChangeId()
+		marker := ""
+		if slices.Contains(r.highlightedIds, changeId) {
+			marker = "<< move >>"
+		}
+		if r.Target == intents.ModeTargetInsert && r.InsertStart.GetChangeId() == commit.GetChangeId() {
+			marker = "<< after this >>"
+		}
+		if r.Target == intents.ModeTargetInsert && r.To.GetChangeId() == commit.GetChangeId() {
+			marker = "<< before this >>"
+		}
+		if r.SkipEmptied && marker != "" {
+			marker += " (skip emptied)"
+		}
+		return sourceMarkerStyle.Render(marker)
+	}
+	expectedPos := operations.RenderPositionBefore
+	if r.Target == intents.ModeTargetBefore || r.Target == intents.ModeTargetInsert {
+		expectedPos = operations.RenderPositionAfter
+	}
+
+	if pos != expectedPos {
+		return ""
+	}
+
+	isSelected := r.To != nil && r.To.GetChangeId() == commit.GetChangeId()
+	if !isSelected {
+		return ""
+	}
+
+	var source string
+	isMany := len(r.From.Revisions) > 0
+	switch {
+	case r.Source == SourceBranch && isMany:
+		source = "branches of "
+	case r.Source == SourceBranch:
+		source = "branch of "
+	case r.Source == SourceDescendants && isMany:
+		source = "itself and descendants of each "
+	case r.Source == SourceDescendants:
+		source = "itself and descendants of "
+	case r.Source == SourceRevision && isMany:
+		source = "revisions "
+	case r.Source == SourceRevision:
+		source = "revision "
+	}
+	var ret string
+	if r.Target == intents.ModeTargetDestination {
+		ret = "onto"
+	}
+	if r.Target == intents.ModeTargetAfter {
+		ret = "after"
+	}
+	if r.Target == intents.ModeTargetBefore {
+		ret = "before"
+	}
+	if r.Target == intents.ModeTargetInsert {
+		ret = "insert"
+	}
+
+	if r.Target == intents.ModeTargetInsert {
+		return lipgloss.JoinHorizontal(
+			lipgloss.Left,
+			targetMarkerStyle.Render("<< insert >>"),
+			" ",
+			dimmedStyle.Render(source),
+			changeIdStyle.Render(strings.Join(r.From.GetIds(), " ")),
+			dimmedStyle.Render(" between "),
+			changeIdStyle.Render(r.InsertStart.GetChangeId()),
+			dimmedStyle.Render(" and "),
+			changeIdStyle.Render(r.To.GetChangeId()),
+		)
+	}
+
+	return lipgloss.JoinHorizontal(
+		lipgloss.Left,
+		targetMarkerStyle.Render("<< "+ret+" >>"),
+		dimmedStyle.Render(" rebase "),
+		dimmedStyle.Render(source),
+		changeIdStyle.Render(strings.Join(r.From.GetIds(), " ")),
+		dimmedStyle.Render(" "),
+		dimmedStyle.Render(ret),
+		dimmedStyle.Render(" "),
+		changeIdStyle.Render(r.To.GetChangeId()),
+	)
+}
+
+func (r *Operation) Name() string {
+	return "rebase"
+}
+
+func (r *Operation) ViewRect(_ *render.DisplayContext, _ layout.Box) {}
+
+func (r *Operation) targetArg() string {
+	if strings.TrimSpace(r.targetName) != "" {
+		return r.targetName
+	}
+	if r.To != nil {
+		return r.To.GetChangeId()
+	}
+	return ""
+}
+
+func NewOperation(context *context.MainContext, from jj.SelectedRevisions, current *jj.Commit, source Source, target intents.ModeTarget) *Operation {
+	return &Operation{
+		context: context,
+		From:    from,
+		To:      current,
+		Source:  source,
+		Target:  target,
+	}
+}

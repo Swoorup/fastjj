@@ -1,8 +1,11 @@
 # Tutorial
 
-> **Hint:** This tutorial has become somewhat out of date. Many people find
-> the alternative (not quite finished) [tutorial by Steve
-> Klabnik](https://steveklabnik.github.io/jujutsu-tutorial/) helpful.
+> **Hint:** This tutorial covers the basics accurately, but since it was
+> written Jujutsu has gained many new features. For a tutorial covering a wider
+> range of features, you may find the (not quite finished) [tutorial by Steve
+> Klabnik](https://steveklabnik.github.io/jujutsu-tutorial/) helpful. If you're
+> looking for a tutorial that doesn't require experience with Git, take a look
+> at [Jujutsu for everyone](https://jj-for-everyone.github.io).
 
 This text assumes that the reader is familiar with Git.
 
@@ -23,10 +26,12 @@ Let's start by cloning GitHub's Hello-World repo using `jj`:
 # repos yet)
 $ jj git clone https://github.com/octocat/Hello-World
 Fetching into new repo in "/tmp/tmp.O1DWMiaKd4/Hello-World"
+remote: Enumerating objects: 13, done.
+remote: Total 13 (delta 0), reused 0 (delta 0), pack-reused 13 (from 1)
 bookmark: master@origin          [new] untracked
 bookmark: octocat-patch-1@origin [new] untracked
 bookmark: test@origin            [new] untracked
-Setting the revset alias "trunk()" to "master@origin"
+Setting the revset alias `trunk()` to `master@origin`
 Working copy  (@) now at: kntqzsqt d7439b06 (empty) (no description set)
 Parent commit (@-)      : orrkosyo 7fd1a60b master | (empty) Merge pull request #6 from Spaceghost/patch-1
 Added 1 files, modified 0 files, removed 0 files
@@ -71,7 +76,7 @@ change, resulting in a new commit hash, but the change ID will remain the same.
 You can see that our clone operation automatically created a new change:
 
 ```shell
-Working copy : kntqzsqt d7439b06 (empty) (no description set)
+Working copy  (@) : kntqzsqt d7439b06 (empty) (no description set)
 ```
 
 This new change has the ID `kntqzsqt` and it is currently empty (contains no
@@ -84,7 +89,7 @@ instead of "Hello". Start by describing the change (adding a commit message) so
 we don't forget what we're working on:
 
 ```shell
-# This brings up $EDITOR (or `pico` or `Notepad` by default).
+# This brings up $EDITOR (or `nano` or `Notepad` by default).
 # Enter something like "Say goodbye" in the editor and then save the file and close
 # the editor.
 $ jj describe
@@ -117,7 +122,7 @@ To see the diff, run `jj diff`:
 ```shell
 $ jj diff --git  # Feel free to skip the `--git` flag
 diff --git a/README b/README
-index 980a0d5f19...1ce3f81130 100644
+index 980a0d5f19..1ce3f81130 100644
 --- a/README
 +++ b/README
 @@ -1,1 +1,1 @@
@@ -173,15 +178,11 @@ in its `jj log` command:
 
 ```shell
 $ jj log
-@  mpqrykyp martinvonz@google.com 2023-02-12 15:00:22.000 -08:00 aef4df99
+@  mpqrykyp martinvonz@google.com 2023-02-12 15:00:22 aef4df99
 │  (empty) (no description set)
-◉  kntqzsqt martinvonz@google.com 2023-02-12 14:56:59.000 -08:00 5d39e19d
+○  kntqzsqt martinvonz@google.com 2023-02-12 14:56:59 5d39e19d
 │  Say goodbye
-│ ◉  tpstlust support+octocat@github.com 2018-05-10 12:55:19.000 -05:00 octocat-patch-1@origin b1b3f972
-├─╯  sentence case
-│ ◉  kowxouwz octocat@nowhere.com 2014-06-10 15:22:26.000 -07:00 test@origin b3cbd5bb
-├─╯  Create CONTRIBUTING.md
-◉  orrkosyo octocat@nowhere.com 2012-03-06 15:06:50.000 -08:00 master 7fd1a60b
+◆  orrkosyo octocat@nowhere.com 2012-03-06 15:06:50 master 7fd1a60b
 │  (empty) Merge pull request #6 from Spaceghost/patch-1
 ~
 ```
@@ -204,11 +205,13 @@ and `~` for difference. For example:
 
 ```shell
 $ jj log -r '@ | root() | bookmarks()'
-@  mpqrykyp martinvonz@google.com 2023-02-12 15:00:22.000 -08:00 aef4df99
-╷  (empty) (no description set)
-◉  orrkosyo octocat@nowhere.com 2012-03-06 15:06:50.000 -08:00 master 7fd1a60b
-╷  (empty) Merge pull request #6 from Spaceghost/patch-1
-◉  zzzzzzzz root() 00000000
+@  mpqrykyp martinvonz@google.com 2023-02-12 15:00:22 aef4df99
+│  (empty) (no description set)
+~  (elided revisions)
+◆  orrkosyo octocat@nowhere.com 2012-03-06 15:06:50 master 7fd1a60b
+│  (empty) Merge pull request #6 from Spaceghost/patch-1
+~  (elided revisions)
+◆  zzzzzzzz root() 00000000
 ```
 
 The `00000000` commit (change ID `zzzzzzzz`) is a virtual commit that's called
@@ -246,63 +249,55 @@ $ jj new -m C; echo c > file2
 Working copy  (@) now at: qzvqqupx 62a3c6d3 (empty) C
 Parent commit (@-)      : puqltutt daa6ffd5 B2
 $ jj log
-@  qzvqqupx martinvonz@google.com 2023-02-12 15:07:41.946 -08:00 2370ddf3
+@  qzvqqupx martinvonz@google.com 2023-02-12 15:07:41 2370ddf3
 │  C
-◉  puqltutt martinvonz@google.com 2023-02-12 15:07:33.000 -08:00 daa6ffd5
+○  puqltutt martinvonz@google.com 2023-02-12 15:07:33 daa6ffd5
 │  B2
-◉  ovknlmro martinvonz@google.com 2023-02-12 15:07:24.000 -08:00 7d7c6e6b
+○  ovknlmro martinvonz@google.com 2023-02-12 15:07:24 7d7c6e6b
 │  B1
-◉  nuvyytnq martinvonz@google.com 2023-02-12 15:07:05.000 -08:00 5dda2f09
+○  nuvyytnq martinvonz@google.com 2023-02-12 15:07:05 5dda2f09
 │  A
-│ ◉  kntqzsqt martinvonz@google.com 2023-02-12 14:56:59.000 -08:00 5d39e19d
+│ ○  kntqzsqt martinvonz@google.com 2023-02-12 14:56:59 5d39e19d
 ├─╯  Say goodbye
-│ ◉  tpstlust support+octocat@github.com 2018-05-10 12:55:19.000 -05:00 octocat-patch-1@origin b1b3f972
-├─╯  sentence case
-│ ◉  kowxouwz octocat@nowhere.com 2014-06-10 15:22:26.000 -07:00 test@origin b3cbd5bb
-├─╯  Create CONTRIBUTING.md
-◉  orrkosyo octocat@nowhere.com 2012-03-06 15:06:50.000 -08:00 master 7fd1a60b
+◆  orrkosyo octocat@nowhere.com 2012-03-06 15:06:50 master 7fd1a60b
 │  (empty) Merge pull request #6 from Spaceghost/patch-1
 ~
 ```
 
 We now have a few commits, where A, B1, and B2 modify the same file, while C
 modifies a different file. Let's now rebase B2 directly onto A. We use the
-`--source`/`-s` option on the change ID of B2, and `--destination`/`-d` option
-on A.
+`--source`/`-s` option on the change ID of B2, and `--onto`/`-o` option on A.
 
 ```shell
-$ jj rebase -s puqltutt -d nuvyytnq  # Replace the IDs by what you have for B2 and A
-Rebased 2 commits
+$ jj rebase -s puqltutt -o nuvyytnq  # Replace the IDs by what you have for B2 and A
+Rebased 2 commits to destination
 Working copy  (@) now at: qzvqqupx 1978b534 (conflict) C
 Parent commit (@-)      : puqltutt f7fb5943 (conflict) B2
 Added 0 files, modified 1 files, removed 0 files
-There are unresolved conflicts at these paths:
+Warning: There are unresolved conflicts at these paths:
 file1    2-sided conflict
-New conflicts appeared in these commits:
+New conflicts appeared in 2 commits:
   qzvqqupx 1978b534 (conflict) C
   puqltutt f7fb5943 (conflict) B2
-To resolve the conflicts, start by updating to the first one:
-  jj new puqltuttzvly
+Hint: To resolve the conflicts, start by creating a commit on top of
+the first conflicted commit:
+  jj new puqltutt
 Then use `jj resolve`, or edit the conflict markers in the file directly.
-Once the conflicts are resolved, you may want to inspect the result with `jj diff`.
+Once the conflicts are resolved, you can inspect the result with `jj diff`.
 Then run `jj squash` to move the resolution into the conflicted commit.
 
 $ jj log
-@  qzvqqupx martinvonz@google.com 2023-02-12 15:08:33.000 -08:00 1978b534 conflict
+@  qzvqqupx martinvonz@google.com 2023-02-12 15:08:33 1978b534 (conflict)
 │  C
-◉  puqltutt martinvonz@google.com 2023-02-12 15:08:33.000 -08:00 f7fb5943 conflict
+×  puqltutt martinvonz@google.com 2023-02-12 15:08:33 f7fb5943 (conflict)
 │  B2
-│ ◉  ovknlmro martinvonz@google.com 2023-02-12 15:07:24.000 -08:00 7d7c6e6b
+│ ○  ovknlmro martinvonz@google.com 2023-02-12 15:07:24 7d7c6e6b
 ├─╯  B1
-◉  nuvyytnq martinvonz@google.com 2023-02-12 15:07:05.000 -08:00 5dda2f09
+○  nuvyytnq martinvonz@google.com 2023-02-12 15:07:05 5dda2f09
 │  A
-│ ◉  kntqzsqt martinvonz@google.com 2023-02-12 14:56:59.000 -08:00 5d39e19d
+│ ○  kntqzsqt martinvonz@google.com 2023-02-12 14:56:59 5d39e19d
 ├─╯  Say goodbye
-│ ◉  tpstlust support+octocat@github.com 2018-05-10 12:55:19.000 -05:00 octocat-patch-1@origin b1b3f972
-├─╯  sentence case
-│ ◉  kowxouwz octocat@nowhere.com 2014-06-10 15:22:26.000 -07:00 test@origin b3cbd5bb
-├─╯  Create CONTRIBUTING.md
-◉  orrkosyo octocat@nowhere.com 2012-03-06 15:06:50.000 -08:00 master 7fd1a60b
+◆  orrkosyo octocat@nowhere.com 2012-03-06 15:06:50 master 7fd1a60b
 │  (empty) Merge pull request #6 from Spaceghost/patch-1
 ~
 ```
@@ -324,29 +319,31 @@ $ jj new puqltutt  # Replace the ID by what you have for B2
 Working copy  (@) now at: zxoosnnp c7068d1c (conflict) (empty) (no description set)
 Parent commit (@-)      : puqltutt f7fb5943 (conflict) B2
 Added 0 files, modified 0 files, removed 1 files
-There are unresolved conflicts at these paths:
+Warning: There are unresolved conflicts at these paths:
 file1    2-sided conflict
 
 $ jj st
 The working copy has no changes.
-There are unresolved conflicts at these paths:
-file1    2-sided conflict
 Working copy  (@) : zxoosnnp c7068d1c (conflict) (empty) (no description set)
 Parent commit (@-): puqltutt f7fb5943 (conflict) B2
-To resolve the conflicts, start by updating to it:
+Warning: There are unresolved conflicts at these paths:
+file1    2-sided conflict
+Hint: To resolve the conflicts, start by creating a commit on top of
+the conflicted commit:
   jj new puqltutt
 Then use `jj resolve`, or edit the conflict markers in the file directly.
-Once the conflicts are resolved, you may want to inspect the result with `jj diff`.
+Once the conflicts are resolved, you can inspect the result with `jj diff`.
 Then run `jj squash` to move the resolution into the conflicted commit.
 
 $ cat file1
-<<<<<<< Conflict 1 of 1
-%%%%%%% Changes from base to side #1
+<<<<<<< conflict 1 of 1
+%%%%%%% diff from: ovknlmro 7d7c6e6b "B1" (parents of rebased revision)
+\\\\\\\        to: nuvyytnq 5dda2f09 "A" (rebase destination)
 -b1
 +a
-+++++++ Contents of side #2
++++++++ puqltutt daa6ffd5 "B2" (rebased revision)
 b2
->>>>>>> Conflict 1 of 1 ends
+>>>>>>> conflict 1 of 1 ends
 
 $ echo resolved > file1
 
@@ -355,34 +352,28 @@ Working copy changes:
 M file1
 Working copy  (@) : zxoosnnp c2a31a06 (no description set)
 Parent commit (@-): puqltutt f7fb5943 (conflict) B2
-Conflict in parent commit has been resolved in working copy
+Hint: Conflict in parent commit has been resolved in working copy
 
 $ jj squash
 Rebased 1 descendant commits
 Working copy  (@) now at: ntxxqymr e3c279cc (empty) (no description set)
 Parent commit (@-)      : puqltutt 2c7a658e B2
-Existing conflicts were resolved or abandoned from these commits:
-  qzvqqupx hidden 1978b534 (conflict) C
-  puqltutt hidden f7fb5943 (conflict) B2
+Existing conflicts were resolved or abandoned from 2 commits.
 
 $ jj log
-@  ntxxqymr martinvonz@google.com 2023-02-12 19:34:09.000 -08:00 e3c279cc
+@  ntxxqymr martinvonz@google.com 2023-02-12 19:34:09 e3c279cc
 │  (empty) (no description set)
-│ ◉  qzvqqupx martinvonz@google.com 2023-02-12 19:34:09.000 -08:00 b9da9d28
+│ ○  qzvqqupx martinvonz@google.com 2023-02-12 19:34:09 b9da9d28
 ├─╯  C
-◉  puqltutt martinvonz@google.com 2023-02-12 19:34:09.000 -08:00 2c7a658e
+○  puqltutt martinvonz@google.com 2023-02-12 19:34:09 2c7a658e
 │  B2
-│ ◉  ovknlmro martinvonz@google.com 2023-02-12 15:07:24.000 -08:00 7d7c6e6b
+│ ○  ovknlmro martinvonz@google.com 2023-02-12 15:07:24 7d7c6e6b
 ├─╯  B1
-◉  nuvyytnq martinvonz@google.com 2023-02-12 15:07:05.000 -08:00 5dda2f09
+○  nuvyytnq martinvonz@google.com 2023-02-12 15:07:05 5dda2f09
 │  A
-│ ◉  kntqzsqt martinvonz@google.com 2023-02-12 14:56:59.000 -08:00 5d39e19d
+│ ○  kntqzsqt martinvonz@google.com 2023-02-12 14:56:59 5d39e19d
 ├─╯  Say goodbye
-│ ◉  tpstlust support+octocat@github.com 2018-05-10 12:55:19.000 -05:00 octocat-patch-1@origin b1b3f972
-├─╯  sentence case
-│ ◉  kowxouwz octocat@nowhere.com 2014-06-10 15:22:26.000 -07:00 test@origin b3cbd5bb
-├─╯  Create CONTRIBUTING.md
-◉  orrkosyo octocat@nowhere.com 2012-03-06 15:06:50.000 -08:00 master 7fd1a60b
+◆  orrkosyo octocat@nowhere.com 2012-03-06 15:06:50 master 7fd1a60b
 │  (empty) Merge pull request #6 from Spaceghost/patch-1
 ~
 ```
@@ -403,54 +394,51 @@ commands to interact with it. To list the operations, use `jj op log`:
 ```shell
 $ jj op log
 @  d3b77addea49 martinvonz@vonz.svl.corp.google.com 3 minutes ago, lasted 3 milliseconds
-│  squash commit 63874fe6c4fba405ffc38b0dd926f03b715cf7ef
+│  squash commits into f7fb5943a6b9460eb106dba2fac5cac1625c6f7a
 │  args: jj squash
-◉  6fc1873c1180 martinvonz@vonz.svl.corp.google.com 3 minutes ago, lasted 1 milliseconds
+○  6fc1873c1180 martinvonz@vonz.svl.corp.google.com 3 minutes ago, lasted 1 milliseconds
 │  snapshot working copy
-│  args: jj squash
-◉  ed91f7bcc1fb martinvonz@vonz.svl.corp.google.com 6 minutes ago, lasted 1 milliseconds
+│  args: jj st
+○  ed91f7bcc1fb martinvonz@vonz.svl.corp.google.com 6 minutes ago, lasted 1 milliseconds
 │  new empty commit
 │  args: jj new puqltutt
-◉  367400773f87 martinvonz@vonz.svl.corp.google.com 12 minutes ago, lasted 3 milliseconds
+○  367400773f87 martinvonz@vonz.svl.corp.google.com 12 minutes ago, lasted 3 milliseconds
 │  rebase commit daa6ffd5a09a8a7d09a65796194e69b7ed0a566d and descendants
-│  args: jj rebase -s puqltutt -d nuvyytnq
+│  args: jj rebase -s puqltutt -o nuvyytnq
 [many more lines]
 ```
 
-The most useful command is `jj undo` (alias for `jj op undo`), which will undo
-an operation. By default, it will undo the most recent operation. Let's try it:
+The most useful command is `jj undo`, which will undo your last operation.
 
 ```shell
 $ jj undo
-New conflicts appeared in these commits:
-  qzvqqupx 1978b534 (conflict) C
-  puqltutt f7fb5943 (conflict) B2
-To resolve the conflicts, start by updating to the first one:
-  jj new puqltuttzvly
-Then use `jj resolve`, or edit the conflict markers in the file directly.
-Once the conflicts are resolved, you may want to inspect the result with `jj diff`.
-Then run `jj squash` to move the resolution into the conflicted commit.
+Reverted operation: d3b77addea49 (2025-05-12 00:27:27) squash commits into f7fb5943a6b9460eb106dba2fac5cac1625c6f7a
 Working copy  (@) now at: zxoosnnp 63874fe6 (no description set)
 Parent commit (@-)      : puqltutt f7fb5943 (conflict) B2
+New conflicts appeared in 2 commits:
+  qzvqqupx 1978b534 (conflict) C
+  puqltutt f7fb5943 (conflict) B2
+Hint: To resolve the conflicts, start by creating a commit on top of
+the first conflicted commit:
+  jj new puqltutt
+Then use `jj resolve`, or edit the conflict markers in the file directly.
+Once the conflicts are resolved, you can inspect the result with `jj diff`.
+Then run `jj squash` to move the resolution into the conflicted commit.
 
 $ jj log
-@  zxoosnnp martinvonz@google.com 2023-02-12 19:34:09.000 -08:00 63874fe6
+@  zxoosnnp martinvonz@google.com 2023-02-12 19:34:09 63874fe6
 │  (no description set)
-│ ◉  qzvqqupx martinvonz@google.com 2023-02-12 15:08:33.000 -08:00 1978b534 conflict
+│ ×  qzvqqupx martinvonz@google.com 2023-02-12 15:08:33 1978b534 (conflict)
 ├─╯  C
-◉  puqltutt martinvonz@google.com 2023-02-12 15:08:33.000 -08:00 f7fb5943 conflict
+×  puqltutt martinvonz@google.com 2023-02-12 15:08:33 f7fb5943 (conflict)
 │  B2
-│ ◉  ovknlmro martinvonz@google.com 2023-02-12 15:07:24.000 -08:00 7d7c6e6b
+│ ○  ovknlmro martinvonz@google.com 2023-02-12 15:07:24 7d7c6e6b
 ├─╯  B1
-◉  nuvyytnq martinvonz@google.com 2023-02-12 15:07:05.000 -08:00 5dda2f09
+○  nuvyytnq martinvonz@google.com 2023-02-12 15:07:05 5dda2f09
 │  A
-│ ◉  kntqzsqt martinvonz@google.com 2023-02-12 14:56:59.000 -08:00 5d39e19d
+│ ○  kntqzsqt martinvonz@google.com 2023-02-12 14:56:59 5d39e19d
 ├─╯  Say goodbye
-│ ◉  tpstlust support+octocat@github.com 2018-05-10 12:55:19.000 -05:00 octocat-patch-1@origin b1b3f972
-├─╯  sentence case
-│ ◉  kowxouwz octocat@nowhere.com 2014-06-10 15:22:26.000 -07:00 test@origin b3cbd5bb
-├─╯  Create CONTRIBUTING.md
-◉  orrkosyo octocat@nowhere.com 2012-03-06 15:06:50.000 -08:00 master 7fd1a60b
+◆  orrkosyo octocat@nowhere.com 2012-03-06 15:06:50 master 7fd1a60b
 │  (empty) Merge pull request #6 from Spaceghost/patch-1
 ~
 ```
@@ -481,20 +469,20 @@ Added 0 files, modified 0 files, removed 1 files
 
 $ jj new -m ABC; printf 'A\nB\nc\n' > file
 Working copy  (@) now at: kwtuwqnm 6f30cd1f (empty) ABC
-Parent commit (@-)      : ztqrpvnw 51002261 ab
+Parent commit (@-)      : ztqrpvnw 51002261 abc
 
 $ jj new -m ABCD; printf 'A\nB\nC\nD\n' > file
 Working copy  (@) now at: mrxqplyk a6749154 (empty) ABCD
 Parent commit (@-)      : kwtuwqnm 30aecc08 ABC
 
 $ jj log -r master::@
-@  mrxqplyk martinvonz@google.com 2023-02-12 19:38:21.000 -08:00 b98c607b
+@  mrxqplyk martinvonz@google.com 2023-02-12 19:38:21 b98c607b
 │  ABCD
-◉  kwtuwqnm martinvonz@google.com 2023-02-12 19:38:12.000 -08:00 30aecc08
+○  kwtuwqnm martinvonz@google.com 2023-02-12 19:38:12 30aecc08
 │  ABC
-◉  ztqrpvnw martinvonz@google.com 2023-02-12 19:38:03.000 -08:00 51002261
+○  ztqrpvnw martinvonz@google.com 2023-02-12 19:38:03 51002261
 │  abc
-◉  orrkosyo octocat@nowhere.com 2012-03-06 15:06:50.000 -08:00 master 7fd1a60b
+◆  orrkosyo octocat@nowhere.com 2012-03-06 15:06:50 master 7fd1a60b
 │  (empty) Merge pull request #6 from Spaceghost/patch-1
 ~
 ```
@@ -552,26 +540,26 @@ the `jj squash` command. That means that you can move any changes you want into
 the parent change, even if they touch the same word, and it won't cause any
 conflicts.
 
-Let's try one final command for changing the contents of an exiting commit. That
+Let's try one final command for changing the contents of an existing commit. That
 command is `jj diffedit`, which lets you edit the changes in a commit without
 checking it out.
 
 ```shell
 $ jj diffedit -r @-
 Hint: Using default editor ':builtin'; run `jj config set --user ui.diff-editor :builtin` to disable this message.
-Created kwtuwqnm 70985eaa (empty) ABC
 Rebased 1 descendant commits
 Working copy  (@) now at: mrxqplyk 1c72cd50 (conflict) ABCD
-Parent commit (@-)      : kwtuwqnm 70985eaa (empty) ABC
+Parent commit (@-)      : kwtuwqnm 70985eaa ABC
 Added 0 files, modified 1 files, removed 0 files
-There are unresolved conflicts at these paths:
+Warning: There are unresolved conflicts at these paths:
 file    2-sided conflict
-New conflicts appeared in these commits:
+New conflicts appeared in 1 commits:
   mrxqplyk 1c72cd50 (conflict) ABCD
-To resolve the conflicts, start by updating to it:
-  jj new mrxqplykmyqv
+Hint: To resolve the conflicts, start by creating a commit on top of
+the conflicted commit:
+  jj new mrxqplyk
 Then use `jj resolve`, or edit the conflict markers in the file directly.
-Once the conflicts are resolved, you may want to inspect the result with `jj diff`.
+Once the conflicts are resolved, you can inspect the result with `jj diff`.
 Then run `jj squash` to move the resolution into the conflicted commit.
 ```
 

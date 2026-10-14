@@ -19,7 +19,10 @@ class ReleasePackageTests(unittest.TestCase):
         self.root = Path(self.temp.name)
         (self.root / "Cargo.toml").write_text('[package]\nversion="0.1.0"\n')
         (self.root / "docs").mkdir()
-        for name in ["LICENSE", "NOTICE", "README.md", "docs/privacy.md"]:
+        (self.root / "vendor/jjui").mkdir(parents=True)
+        (self.root / "vendor/jjui/LICENSE").write_text("MIT license")
+        (self.root / "fastjjui").write_bytes(b"native UI executable")
+        for name in ["LICENSE", "NOTICE", "README.md", "docs/privacy.md", "docs/jjui.md"]:
             (self.root / name).write_text(name + "\n")
         self.binary = self.root / "binary"
         self.binary.write_bytes(b"executable payload")
@@ -34,7 +37,7 @@ class ReleasePackageTests(unittest.TestCase):
                 self.assertEqual(checksum, [hashlib.sha256(archive.read_bytes()).hexdigest(), archive.name])
                 with tarfile.open(archive) as tar:
                     entries = tar.getmembers()
-                    self.assertEqual(len(entries), 6)
+                    self.assertEqual(len(entries), 9)
                     for entry in entries:
                         self.assertFalse(entry.name.startswith("/"))
                         self.assertNotIn("..", Path(entry.name).parts)
@@ -42,6 +45,9 @@ class ReleasePackageTests(unittest.TestCase):
                     binary = next(e for e in entries if e.name.endswith("/fastjj"))
                     self.assertEqual(binary.mode, 0o755)
                     self.assertEqual(tar.extractfile(binary).read(), self.binary.read_bytes())
+                    ui = next(e for e in entries if e.name.endswith("/fastjjui"))
+                    self.assertEqual(ui.mode, 0o755)
+                    self.assertEqual(tar.extractfile(ui).read(), b"native UI executable")
                     info = next(e for e in entries if e.name.endswith("/build-info.json"))
                     data = json.load(tar.extractfile(info))
                     self.assertEqual(data["source_commit"], self.commit)

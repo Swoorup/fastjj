@@ -1,0 +1,175 @@
+package confirmation
+
+import (
+	"strings"
+	"testing"
+
+	"charm.land/bubbles/v2/key"
+	tea "charm.land/bubbletea/v2"
+	"charm.land/lipgloss/v2"
+	"github.com/idursun/jjui/internal/config"
+	"github.com/idursun/jjui/internal/ui/intents"
+	"github.com/idursun/jjui/internal/ui/layout"
+	"github.com/idursun/jjui/internal/ui/render"
+	"github.com/idursun/jjui/internal/ui/theme"
+	"github.com/stretchr/testify/assert"
+)
+
+const (
+	White = "7"
+	Red   = "1"
+	Green = "2"
+	Blue  = "4"
+)
+
+func TestConfirmationWithoutStyleScope(t *testing.T) {
+	palette := theme.NewPalette()
+	palette.Update(map[string]config.Color{
+		"confirmation text":             {Fg: White},
+		"confirmation:selected":         {Fg: Green},
+		"details confirmation text":     {Fg: Blue},
+		"details confirmation:selected": {Fg: Red},
+	})
+
+	originalPalette := theme.DefaultPalette
+	theme.DefaultPalette = palette
+	defer func() { theme.DefaultPalette = originalPalette }()
+
+	defaultModel := New([]string{"Test message"})
+	assert.Equal(t, lipgloss.Color(White), defaultModel.Styles.Text.GetForeground())
+	assert.Equal(t, lipgloss.Color(Green), defaultModel.Styles.Selected.GetForeground())
+}
+
+func TestConfirmationWithStyleScope(t *testing.T) {
+	palette := theme.NewPalette()
+	palette.Update(map[string]config.Color{
+		"confirmation text":             {Fg: White},
+		"confirmation:selected":         {Fg: Green},
+		"details confirmation text":     {Fg: Blue},
+		"details confirmation:selected": {Fg: Red},
+	})
+
+	originalPalette := theme.DefaultPalette
+	theme.DefaultPalette = palette
+	defer func() { theme.DefaultPalette = originalPalette }()
+
+	detailsModel := New(
+		[]string{"Test message"},
+		WithStyleScope("details"),
+	)
+
+	assert.Equal(t, lipgloss.Color(Blue), detailsModel.Styles.Text.GetForeground())
+	assert.Equal(t, lipgloss.Color(Red), detailsModel.Styles.Selected.GetForeground())
+}
+
+func TestConfirmationWithOption(t *testing.T) {
+	var cmdCalled bool
+	testCmd := func() tea.Msg {
+		cmdCalled = true
+		return nil
+	}
+
+	model := New(
+		[]string{"Test message"},
+		WithOption("Yes", testCmd, key.NewBinding(key.WithKeys("y"))),
+		WithOption("No", nil, key.NewBinding(key.WithKeys("n"))),
+	)
+
+	assert.Equal(t, 2, len(model.options))
+	assert.Equal(t, "Yes", model.options[0].label)
+	assert.Equal(t, "No", model.options[1].label)
+
+	cmd := model.Update(intents.Apply{})
+	if cmd != nil {
+		cmd()
+	}
+	assert.True(t, cmdCalled)
+}
+
+func TestDispatcherIntentFlow(t *testing.T) {
+	var selected string
+	model := New(
+		[]string{"Test message"},
+		WithOption("Yes", func() tea.Msg {
+			selected = "yes"
+			return nil
+		}, key.NewBinding(key.WithKeys("y"), key.WithHelp("y", "yes"))),
+		WithAltOption("No", func() tea.Msg {
+			selected = "no"
+			return nil
+		}, func() tea.Msg {
+			selected = "no-alt"
+			return nil
+		}, key.NewBinding(key.WithKeys("n", "esc"), key.WithHelp("n/esc", "no"))),
+	)
+
+	_ = model.Update(intents.OptionSelect{Delta: 1})
+	cmd := model.Update(intents.Apply{Force: true})
+	if cmd != nil {
+		cmd()
+	}
+	assert.Equal(t, "no-alt", selected)
+
+	cmd = model.Update(intents.Cancel{})
+	if cmd != nil {
+		cmd()
+	}
+	assert.Equal(t, "no", selected)
+}
+
+func TestRawEnterAppliesSelectedOption(t *testing.T) {
+	var selected string
+	model := New(
+		[]string{"Test message"},
+		WithOption("Yes", func() tea.Msg {
+			selected = "yes"
+			return nil
+		}, key.NewBinding(key.WithKeys("y"), key.WithHelp("y", "yes"))),
+		WithAltOption("No", func() tea.Msg {
+			selected = "no"
+			return nil
+		}, func() tea.Msg {
+			selected = "no-alt"
+			return nil
+		}, key.NewBinding(key.WithKeys("n", "esc"), key.WithHelp("n/esc", "no"))),
+	)
+
+	cmd := model.Update(tea.KeyPressMsg{Code: tea.KeyEnter})
+	if cmd != nil {
+		cmd()
+	}
+	assert.Equal(t, "yes", selected)
+
+	_ = model.Update(intents.OptionSelect{Delta: 1})
+	cmd = model.Update(tea.KeyPressMsg{Code: tea.KeyEnter, Mod: tea.ModAlt})
+	if cmd != nil {
+		cmd()
+	}
+	assert.Equal(t, "no-alt", selected)
+}
+
+func TestViewRect_DefaultRendersAtZBase(t *testing.T) {
+	model := New([]string{"Test message"})
+
+	dl := render.NewDisplayContext()
+	box := layout.Box{R: layout.Rect(0, 0, 50, 20)}
+	dl.AddDraw(box.R, strings.Repeat("x", box.R.Dx()*box.R.Dy()), render.ZPreview)
+	model.ViewRect(dl, box)
+
+	rendered := dl.RenderToString(box.R.Dx(), box.R.Dy())
+	assert.NotContains(t, rendered, "Test message",
+		"default confirmation should render below preview content")
+}
+
+func TestWithZIndex_RendersAtSpecifiedZIndex(t *testing.T) {
+	model := New([]string{"Test message"}, WithZIndex(render.ZDialogs))
+
+	dl := render.NewDisplayContext()
+	box := layout.Box{R: layout.Rect(0, 0, 50, 20)}
+	dl.AddDraw(box.R, strings.Repeat("x", box.R.Dx()*box.R.Dy()), render.ZPreview)
+	model.ViewRect(dl, box)
+
+	rendered := dl.RenderToString(box.R.Dx(), box.R.Dy())
+	assert.Contains(t, rendered, "Test message",
+		"confirmation with WithZIndex(ZDialogs) should render above preview")
+}

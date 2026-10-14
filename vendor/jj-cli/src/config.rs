@@ -21,6 +21,7 @@ use std::fmt;
 use std::path::Path;
 use std::path::PathBuf;
 use std::process::Command;
+use std::sync::LazyLock;
 
 use etcetera::BaseStrategy as _;
 use itertools::Itertools as _;
@@ -34,16 +35,14 @@ use jj_lib::config::ConfigResolutionContext;
 use jj_lib::config::ConfigSource;
 use jj_lib::config::ConfigValue;
 use jj_lib::config::StackedConfig;
-use jj_lib::dsl_util;
 use regex::Captures;
 use regex::Regex;
+use serde::Serialize as _;
 use tracing::instrument;
 
+use crate::command_error::CommandError;
 use crate::command_error::config_error;
 use crate::command_error::config_error_with_message;
-use crate::command_error::CommandError;
-use crate::text_util;
-use crate::ui::Ui;
 
 // TODO(#879): Consider generating entire schema dynamically vs. static file.
 pub const CONFIG_SCHEMA: &str = include_str!("config-schema.json");
@@ -70,19 +69,66 @@ fn is_bare_string(value_str: &str) -> bool {
     }
 }
 
+/// Converts [`ConfigValue`] (or [`toml_edit::Value`]) to [`toml::Value`] which
+/// implements [`serde::Serialize`].
+pub fn to_serializable_value(value: ConfigValue) -> toml::Value {
+    match value {
+        ConfigValue::String(v) => toml::Value::String(v.into_value()),
+        ConfigValue::Integer(v) => toml::Value::Integer(v.into_value()),
+        ConfigValue::Float(v) => toml::Value::Float(v.into_value()),
+        ConfigValue::Boolean(v) => toml::Value::Boolean(v.into_value()),
+        ConfigValue::Datetime(v) => toml::Value::Datetime(v.into_value()),
+        ConfigValue::Array(array) => {
+            let array = array.into_iter().map(to_serializable_value).collect();
+            toml::Value::Array(array)
+        }
+        ConfigValue::InlineTable(table) => {
+            let table = table
+                .into_iter()
+                .map(|(k, v)| (k, to_serializable_value(v)))
+                .collect();
+            toml::Value::Table(table)
+        }
+    }
+}
+
 /// Configuration variable with its source information.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, serde::Serialize)]
 pub struct AnnotatedValue {
     /// Dotted name path to the configuration variable.
+    #[serde(serialize_with = "serialize_name")]
     pub name: ConfigNamePathBuf,
     /// Configuration value.
+    #[serde(serialize_with = "serialize_value")]
     pub value: ConfigValue,
     /// Source of the configuration value.
+    #[serde(serialize_with = "serialize_source")]
     pub source: ConfigSource,
     /// Path to the source file, if available.
     pub path: Option<PathBuf>,
     /// True if this value is overridden in higher precedence layers.
     pub is_overridden: bool,
+}
+
+fn serialize_name<S>(name: &ConfigNamePathBuf, serializer: S) -> Result<S::Ok, S::Error>
+where
+    S: serde::Serializer,
+{
+    name.to_string().serialize(serializer)
+}
+
+fn serialize_value<S>(value: &ConfigValue, serializer: S) -> Result<S::Ok, S::Error>
+where
+    S: serde::Serializer,
+{
+    to_serializable_value(value.clone()).serialize(serializer)
+}
+
+fn serialize_source<S>(source: &ConfigSource, serializer: S) -> Result<S::Ok, S::Error>
+where
+    S: serde::Serializer,
+{
+    source.to_string().serialize(serializer)
 }
 
 /// Collects values under the given `filter_prefix` name recursively, from all
@@ -184,7 +230,7 @@ struct ConfigPath {
 impl ConfigPath {
     fn new(path: PathBuf) -> Self {
         use ConfigPathState::*;
-        ConfigPath {
+        Self {
             state: if path.exists() { Exists } else { New },
             path,
         }
@@ -218,14 +264,12 @@ fn create_dir_all(path: &Path) -> std::io::Result<()> {
 #[derive(Clone, Default, Debug)]
 struct UnresolvedConfigEnv {
     config_dir: Option<PathBuf>,
-    // TODO: remove after jj 0.35
-    macos_legacy_config_dir: Option<PathBuf>,
     home_dir: Option<PathBuf>,
     jj_config: Option<String>,
 }
 
 impl UnresolvedConfigEnv {
-    fn resolve(self, ui: &Ui) -> Vec<ConfigPath> {
+    fn resolve(self) -> Vec<ConfigPath> {
         if let Some(paths) = self.jj_config {
             return split_paths(&paths)
                 .filter(|path| !path.as_os_str().is_empty())
@@ -248,24 +292,11 @@ impl UnresolvedConfigEnv {
             config_dir.push("conf.d");
             ConfigPath::new(config_dir)
         });
-        let legacy_platform_config_path =
-            self.macos_legacy_config_dir.clone().map(|mut config_dir| {
-                config_dir.push("jj");
-                config_dir.push("config.toml");
-                ConfigPath::new(config_dir)
-            });
-        let legacy_platform_config_dir = self.macos_legacy_config_dir.map(|mut config_dir| {
-            config_dir.push("jj");
-            config_dir.push("conf.d");
-            ConfigPath::new(config_dir)
-        });
 
-        if let Some(path) = home_config_path {
-            if path.exists()
-                || (platform_config_path.is_none() && legacy_platform_config_path.is_none())
-            {
-                paths.push(path);
-            }
+        if let Some(path) = home_config_path
+            && (path.exists() || platform_config_path.is_none())
+        {
+            paths.push(path);
         }
 
         // This should be the default config created if there's
@@ -274,50 +305,13 @@ impl UnresolvedConfigEnv {
             paths.push(path);
         }
 
-        // theoretically these should be an `if let Some(...) = ... && ..., but that
-        // isn't stable
-        if let Some(path) = platform_config_dir {
-            if path.exists() {
-                paths.push(path);
-            }
-        }
-
-        if let Some(path) = legacy_platform_config_path {
-            if path.exists() {
-                Self::warn_for_deprecated_path(
-                    ui,
-                    path.as_path(),
-                    "~/Library/Application Support",
-                    "~/.config",
-                );
-                paths.push(path);
-            }
-        }
-        if let Some(path) = legacy_platform_config_dir {
-            if path.exists() {
-                Self::warn_for_deprecated_path(
-                    ui,
-                    path.as_path(),
-                    "~/Library/Application Support",
-                    "~/.config",
-                );
-                paths.push(path);
-            }
+        if let Some(path) = platform_config_dir
+            && path.exists()
+        {
+            paths.push(path);
         }
 
         paths
-    }
-
-    fn warn_for_deprecated_path(ui: &Ui, path: &Path, old: &str, new: &str) {
-        let _ = indoc::writedoc!(
-            ui.warning_default(),
-            r"
-            Deprecated configuration file `{}`.
-            Configuration files in `{old}` are deprecated, and support will be removed in a future release.
-            Instead, move your configuration files to `{new}`.
-            ",
-            path.display(),
-        );
     }
 }
 
@@ -325,31 +319,20 @@ impl UnresolvedConfigEnv {
 pub struct ConfigEnv {
     home_dir: Option<PathBuf>,
     repo_path: Option<PathBuf>,
+    workspace_path: Option<PathBuf>,
     user_config_paths: Vec<ConfigPath>,
     repo_config_path: Option<ConfigPath>,
+    workspace_config_path: Option<ConfigPath>,
     command: Option<String>,
+    hostname: Option<String>,
 }
 
 impl ConfigEnv {
     /// Initializes configuration loader based on environment variables.
-    pub fn from_environment(ui: &Ui) -> Self {
+    pub fn from_environment() -> Self {
         let config_dir = etcetera::choose_base_strategy()
             .ok()
             .map(|s| s.config_dir());
-
-        // older versions of jj used a more "GUI" config option,
-        // which is not designed for user-editable configuration of CLI utilities.
-        let macos_legacy_config_dir = if cfg!(target_os = "macos") {
-            etcetera::base_strategy::choose_native_strategy()
-                .ok()
-                .map(|s| {
-                    // note that etcetera calls Library/Application Support the "data dir",
-                    // Library/Preferences is supposed to be exclusively plists
-                    s.data_dir()
-                })
-        } else {
-            None
-        };
 
         // Canonicalize home as we do canonicalize cwd in CliRunner. $HOME might
         // point to symlink.
@@ -359,16 +342,18 @@ impl ConfigEnv {
 
         let env = UnresolvedConfigEnv {
             config_dir,
-            macos_legacy_config_dir,
             home_dir: home_dir.clone(),
             jj_config: env::var("JJ_CONFIG").ok(),
         };
-        ConfigEnv {
+        Self {
             home_dir,
             repo_path: None,
-            user_config_paths: env.resolve(ui),
+            workspace_path: None,
+            user_config_paths: env.resolve(),
             repo_config_path: None,
+            workspace_config_path: None,
             command: None,
+            hostname: whoami::hostname().ok(),
         }
     }
 
@@ -486,13 +471,69 @@ impl ConfigEnv {
         Ok(())
     }
 
+    /// Sets the directory for the workspace and the workspace-specific config
+    /// file.
+    pub fn reset_workspace_path(&mut self, path: &Path) {
+        self.workspace_path = Some(path.to_owned());
+        self.workspace_config_path = Some(ConfigPath::new(
+            path.join(".jj").join("workspace-config.toml"),
+        ));
+    }
+
+    /// Returns a path to the workspace-specific config file.
+    pub fn workspace_config_path(&self) -> Option<&Path> {
+        self.workspace_config_path.as_ref().map(|p| p.as_path())
+    }
+
+    /// Returns a path to the existing workspace-specific config file.
+    fn existing_workspace_config_path(&self) -> Option<&Path> {
+        match self.workspace_config_path {
+            Some(ref path) if path.exists() => Some(path.as_path()),
+            _ => None,
+        }
+    }
+
+    /// Returns workspace configuration files for modification. Instantiates one
+    /// if `config` has no workspace configuration layers.
+    ///
+    /// If the workspace path is unknown, this function returns an empty `Vec`.
+    /// Since the workspace config path cannot be a directory, the returned
+    /// `Vec` should have at most one config file.
+    pub fn workspace_config_files(
+        &self,
+        config: &RawConfig,
+    ) -> Result<Vec<ConfigFile>, ConfigLoadError> {
+        config_files_for(config, ConfigSource::Workspace, || {
+            self.new_workspace_config_file()
+        })
+    }
+
+    fn new_workspace_config_file(&self) -> Result<Option<ConfigFile>, ConfigLoadError> {
+        self.workspace_config_path()
+            .map(|path| ConfigFile::load_or_empty(ConfigSource::Workspace, path))
+            .transpose()
+    }
+
+    /// Loads workspace-specific config file into the given `config`. The old
+    /// workspace-config layer will be replaced if any.
+    #[instrument]
+    pub fn reload_workspace_config(&self, config: &mut RawConfig) -> Result<(), ConfigLoadError> {
+        config.as_mut().remove_layers(ConfigSource::Workspace);
+        if let Some(path) = self.existing_workspace_config_path() {
+            config.as_mut().load_file(ConfigSource::Workspace, path)?;
+        }
+        Ok(())
+    }
+
     /// Resolves conditional scopes within the current environment. Returns new
     /// resolved config.
     pub fn resolve_config(&self, config: &RawConfig) -> Result<StackedConfig, ConfigGetError> {
         let context = ConfigResolutionContext {
             home_dir: self.home_dir.as_deref(),
             repo_path: self.repo_path.as_deref(),
+            workspace_path: self.workspace_path.as_deref(),
             command: self.command.as_deref(),
+            hostname: self.hostname.as_deref().unwrap_or(""),
         };
         jj_lib::config::resolve(config.as_ref(), &context)
     }
@@ -521,11 +562,11 @@ fn config_files_for(
 /// Sources from the lowest precedence:
 /// 1. Default
 /// 2. Base environment variables
-/// 3. [User configs](https://jj-vcs.github.io/jj/latest/config/)
+/// 3. [User configs](https://docs.jj-vcs.dev/latest/config/)
 /// 4. Repo config `.jj/repo/config.toml`
-/// 5. TODO: Workspace config `.jj/config.toml`
+/// 5. Workspace config `.jj/workspace-config.toml`
 /// 6. Override environment variables
-/// 7. Command-line arguments `--config`, `--config-toml`, `--config-file`
+/// 7. Command-line arguments `--config` and `--config-file`
 ///
 /// This function sets up 1, 2, and 6.
 pub fn config_from_environment(default_layers: impl IntoIterator<Item = ConfigLayer>) -> RawConfig {
@@ -542,13 +583,13 @@ const OP_USERNAME: &str = "operation.username";
 /// Environment variables that should be overridden by config values
 fn env_base_layer() -> ConfigLayer {
     let mut layer = ConfigLayer::empty(ConfigSource::EnvBase);
-    if let Ok(value) = whoami::fallible::hostname()
-        .inspect_err(|err| tracing::warn!(?err, "failed to get hostname"))
+    if let Ok(value) =
+        whoami::hostname().inspect_err(|err| tracing::warn!(?err, "failed to get hostname"))
     {
         layer.set_value(OP_HOSTNAME, value).unwrap();
     }
-    if let Ok(value) = whoami::fallible::username()
-        .inspect_err(|err| tracing::warn!(?err, "failed to get username"))
+    if let Ok(value) =
+        whoami::username().inspect_err(|err| tracing::warn!(?err, "failed to get username"))
     {
         layer.set_value(OP_USERNAME, value).unwrap();
     } else if let Ok(value) = env::var("USER") {
@@ -561,14 +602,13 @@ fn env_base_layer() -> ConfigLayer {
         // should override $NO_COLOR." https://no-color.org/
         layer.set_value("ui.color", "never").unwrap();
     }
-    if let Ok(value) = env::var("PAGER") {
-        layer.set_value("ui.pager", value).unwrap();
-    }
     if let Ok(value) = env::var("VISUAL") {
         layer.set_value("ui.editor", value).unwrap();
     } else if let Ok(value) = env::var("EDITOR") {
         layer.set_value("ui.editor", value).unwrap();
     }
+    // Intentionally NOT respecting $PAGER here as it often creates a bad
+    // out-of-the-box experience for users, see http://github.com/jj-vcs/jj/issues/3502.
     layer
 }
 
@@ -628,8 +668,6 @@ fn env_overrides_layer() -> ConfigLayer {
 pub enum ConfigArgKind {
     /// `--config=NAME=VALUE`
     Item,
-    /// `--config-toml=TOML`
-    Toml,
     /// `--config-file=PATH`
     File,
 }
@@ -653,11 +691,6 @@ pub fn parse_config_args(
                     })?;
                 }
                 layers.push(layer);
-            }
-            ConfigArgKind::Toml => {
-                for (_, text) in chunk {
-                    layers.push(ConfigLayer::parse(source, text)?);
-                }
             }
             ConfigArgKind::File => {
                 for (_, path) in chunk {
@@ -690,61 +723,43 @@ fn parse_config_arg_item(item_str: &str) -> Result<(ConfigNamePathBuf, ConfigVal
 /// List of rules to migrate deprecated config variables.
 pub fn default_config_migrations() -> Vec<ConfigMigrationRule> {
     vec![
-        // TODO: Delete in jj 0.32+
-        ConfigMigrationRule::rename_value("git.auto-local-branch", "git.auto-local-bookmark"),
-        // TODO: Delete in jj 0.33+
-        ConfigMigrationRule::rename_update_value(
-            "signing.sign-all",
-            "signing.behavior",
-            |old_value| {
-                if old_value
-                    .as_bool()
-                    .ok_or("signing.sign-all expects a boolean")?
-                {
-                    Ok("own".into())
-                } else {
-                    Ok("keep".into())
-                }
-            },
-        ),
-        // TODO: Delete in jj 0.34+
+        // TODO: Delete in jj 0.38.0+
+        ConfigMigrationRule::rename_value("core.fsmonitor", "fsmonitor.backend"),
+        // TODO: Delete in jj 0.38.0+
         ConfigMigrationRule::rename_value(
-            "core.watchman.register_snapshot_trigger",
             "core.watchman.register-snapshot-trigger",
+            "fsmonitor.watchman.register-snapshot-trigger",
         ),
-        // TODO: Delete in jj 0.34+
-        ConfigMigrationRule::rename_value("diff.format", "ui.diff.format"),
-        // TODO: Delete with the `git.subprocess` setting.
-        #[cfg(not(feature = "git2"))]
+        // TODO: Delete in jj 0.42.0+
         ConfigMigrationRule::custom(
             |layer| {
-                let Ok(Some(subprocess)) = layer.look_up_item("git.subprocess") else {
+                let Ok(Some(val)) = layer.look_up_item("git.auto-local-bookmark") else {
                     return false;
                 };
-                subprocess.as_bool() == Some(false)
+                val.as_bool().is_some_and(|b| b)
             },
-            |_| Ok("jj was compiled without `git.subprocess = false` support".into()),
+            |_| {
+                Ok("`git.auto-local-bookmark` is deprecated; use \
+                    `remotes.<name>.auto-track-bookmarks` instead.
+Example: jj config set --user remotes.origin.auto-track-bookmarks '*'
+For details, see: https://docs.jj-vcs.dev/latest/config/#automatic-tracking-of-bookmarks"
+                    .into())
+            },
         ),
-        // TODO: Delete with the `git.subprocess` setting.
+        // TODO: Delete in jj 0.42.0+
         ConfigMigrationRule::custom(
             |layer| {
-                let Ok(Some(subprocess)) = layer.look_up_item("git.subprocess") else {
+                let Ok(Some(val)) = layer.look_up_item("git.push-new-bookmarks") else {
                     return false;
                 };
-                subprocess.as_bool() == Some(true) && layer.source != ConfigSource::Default
+                val.as_bool().is_some_and(|b| b)
             },
-            |_| Ok("`git.subprocess = true` is now the default".into()),
-        ),
-        // TODO: Delete in jj 0.35.0+
-        ConfigMigrationRule::rename_update_value(
-            "ui.default-description",
-            "template-aliases.default_commit_description",
-            |old_value| {
-                let value = old_value.as_str().ok_or("expected a string")?;
-                // Trailing newline would be padded by templater
-                let value = text_util::complete_newline(value);
-                let escaped = dsl_util::escape_string(&value);
-                Ok(format!(r#""{escaped}""#).into())
+            |_| {
+                Ok("`git.push-new-bookmarks` is deprecated; use \
+                    `remotes.<name>.auto-track-bookmarks` instead.
+Example: jj config set --user remotes.origin.auto-track-bookmarks '*'
+For details, see: https://docs.jj-vcs.dev/latest/config/#automatic-tracking-of-bookmarks"
+                    .into())
             },
         ),
     ]
@@ -764,7 +779,7 @@ pub enum CommandNameAndArgs {
 
 impl CommandNameAndArgs {
     /// Returns command name without arguments.
-    pub fn split_name(&self) -> Cow<str> {
+    pub fn split_name(&self) -> Cow<'_, str> {
         let (name, _) = self.split_name_and_args();
         name
     }
@@ -772,20 +787,29 @@ impl CommandNameAndArgs {
     /// Returns command name and arguments.
     ///
     /// The command name may be an empty string (as well as each argument.)
-    pub fn split_name_and_args(&self) -> (Cow<str>, Cow<[String]>) {
+    pub fn split_name_and_args(&self) -> (Cow<'_, str>, Cow<'_, [String]>) {
         match self {
-            CommandNameAndArgs::String(s) => {
+            Self::String(s) => {
                 // Handle things like `EDITOR=emacs -nw` (TODO: parse shell escapes)
                 let mut args = s.split(' ').map(|s| s.to_owned());
                 (args.next().unwrap().into(), args.collect())
             }
-            CommandNameAndArgs::Vec(NonEmptyCommandArgsVec(a)) => {
-                (Cow::Borrowed(&a[0]), Cow::Borrowed(&a[1..]))
-            }
-            CommandNameAndArgs::Structured {
+            Self::Vec(NonEmptyCommandArgsVec(a)) => (Cow::Borrowed(&a[0]), Cow::Borrowed(&a[1..])),
+            Self::Structured {
                 env: _,
                 command: cmd,
             } => (Cow::Borrowed(&cmd.0[0]), Cow::Borrowed(&cmd.0[1..])),
+        }
+    }
+
+    /// Returns command string only if the underlying type is a string.
+    ///
+    /// Use this to parse enum strings such as `":builtin"`, which can be
+    /// escaped as `[":builtin"]`.
+    pub fn as_str(&self) -> Option<&str> {
+        match self {
+            Self::String(s) => Some(s),
+            Self::Vec(_) | Self::Structured { .. } => None,
         }
     }
 
@@ -802,8 +826,8 @@ impl CommandNameAndArgs {
         variables: &HashMap<&str, V>,
     ) -> Command {
         let (name, args) = self.split_name_and_args();
-        let mut cmd = Command::new(name.as_ref());
-        if let CommandNameAndArgs::Structured { env, .. } = self {
+        let mut cmd = Command::new(interpolate_variables_single(name.as_ref(), variables));
+        if let Self::Structured { env, .. } = self {
             cmd.envs(env);
         }
         cmd.args(interpolate_variables(&args, variables));
@@ -813,17 +837,17 @@ impl CommandNameAndArgs {
 
 impl<T: AsRef<str> + ?Sized> From<&T> for CommandNameAndArgs {
     fn from(s: &T) -> Self {
-        CommandNameAndArgs::String(s.as_ref().to_owned())
+        Self::String(s.as_ref().to_owned())
     }
 }
 
 impl fmt::Display for CommandNameAndArgs {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            CommandNameAndArgs::String(s) => write!(f, "{s}"),
+            Self::String(s) => write!(f, "{s}"),
             // TODO: format with shell escapes
-            CommandNameAndArgs::Vec(a) => write!(f, "{}", a.0.join(" ")),
-            CommandNameAndArgs::Structured { env, command } => {
+            Self::Vec(a) => write!(f, "{}", a.0.join(" ")),
+            Self::Structured { env, command } => {
                 for (k, v) in env {
                     write!(f, "{k}={v} ")?;
                 }
@@ -834,27 +858,28 @@ impl fmt::Display for CommandNameAndArgs {
 }
 
 // Not interested in $UPPER_CASE_VARIABLES
-static VARIABLE_REGEX: once_cell::sync::Lazy<Regex> =
-    once_cell::sync::Lazy::new(|| Regex::new(r"\$([a-z0-9_]+)\b").unwrap());
+static VARIABLE_REGEX: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"\$([a-z0-9_]+)\b").unwrap());
 
 pub fn interpolate_variables<V: AsRef<str>>(
     args: &[String],
     variables: &HashMap<&str, V>,
 ) -> Vec<String> {
     args.iter()
-        .map(|arg| {
-            VARIABLE_REGEX
-                .replace_all(arg, |caps: &Captures| {
-                    let name = &caps[1];
-                    if let Some(subst) = variables.get(name) {
-                        subst.as_ref().to_owned()
-                    } else {
-                        caps[0].to_owned()
-                    }
-                })
-                .into_owned()
-        })
+        .map(|arg| interpolate_variables_single(arg, variables))
         .collect()
+}
+
+fn interpolate_variables_single<V: AsRef<str>>(arg: &str, variables: &HashMap<&str, V>) -> String {
+    VARIABLE_REGEX
+        .replace_all(arg, |caps: &Captures| {
+            let name = &caps[1];
+            if let Some(subst) = variables.get(name) {
+                subst.as_ref().to_owned()
+            } else {
+                caps[0].to_owned()
+            }
+        })
+        .into_owned()
 }
 
 /// Return all variable names found in the args, without the dollar sign
@@ -881,7 +906,7 @@ impl TryFrom<Vec<String>> for NonEmptyCommandArgsVec {
         if args.is_empty() {
             Err("command arguments should not be empty")
         } else {
-            Ok(NonEmptyCommandArgsVec(args))
+            Ok(Self(args))
         }
     }
 }
@@ -1365,15 +1390,15 @@ mod tests {
     }
 
     impl Want {
-        const fn new(path: &'static str) -> Want {
-            Want {
+        const fn new(path: &'static str) -> Self {
+            Self {
                 path,
                 state: WantState::New,
             }
         }
 
-        const fn existing(path: &'static str) -> Want {
-            Want {
+        const fn existing(path: &'static str) -> Self {
+            Self {
                 path,
                 state: WantState::Existing,
             }
@@ -1630,51 +1655,6 @@ mod tests {
         }
     }
 
-    fn config_path_macos_legacy_exists() -> TestCase {
-        TestCase {
-            files: &["macos-legacy/jj/config.toml"],
-            env: UnresolvedConfigEnv {
-                home_dir: Some("home".into()),
-                config_dir: Some("config".into()),
-                macos_legacy_config_dir: Some("macos-legacy".into()),
-                ..Default::default()
-            },
-            wants: vec![
-                Want::new("config/jj/config.toml"),
-                Want::existing("macos-legacy/jj/config.toml"),
-            ],
-        }
-    }
-
-    fn config_path_macos_legacy_both_exist() -> TestCase {
-        TestCase {
-            files: &["macos-legacy/jj/config.toml", "config/jj/config.toml"],
-            env: UnresolvedConfigEnv {
-                home_dir: Some("home".into()),
-                config_dir: Some("config".into()),
-                macos_legacy_config_dir: Some("macos-legacy".into()),
-                ..Default::default()
-            },
-            wants: vec![
-                Want::existing("config/jj/config.toml"),
-                Want::existing("macos-legacy/jj/config.toml"),
-            ],
-        }
-    }
-
-    fn config_path_macos_legacy_new() -> TestCase {
-        TestCase {
-            files: &[],
-            env: UnresolvedConfigEnv {
-                home_dir: Some("home".into()),
-                config_dir: Some("config".into()),
-                macos_legacy_config_dir: Some("macos-legacy".into()),
-                ..Default::default()
-            },
-            wants: vec![Want::new("config/jj/config.toml")],
-        }
-    }
-
     #[test_case(config_path_home_existing())]
     #[test_case(config_path_home_new())]
     #[test_case(config_path_home_existing_platform_new())]
@@ -1693,9 +1673,6 @@ mod tests {
     #[test_case(config_path_platform_existing_conf_dir_existing())]
     #[test_case(config_path_all_existing())]
     #[test_case(config_path_none())]
-    #[test_case(config_path_macos_legacy_exists())]
-    #[test_case(config_path_macos_legacy_both_exist())]
-    #[test_case(config_path_macos_legacy_new())]
     fn test_config_path(case: TestCase) {
         let tmp = setup_config_fs(case.files);
         let env = resolve_config_env(&case.env, tmp.path());
@@ -1735,7 +1712,6 @@ mod tests {
         let home_dir = env.home_dir.as_ref().map(|p| root.join(p));
         let env = UnresolvedConfigEnv {
             config_dir: env.config_dir.as_ref().map(|p| root.join(p)),
-            macos_legacy_config_dir: env.macos_legacy_config_dir.as_ref().map(|p| root.join(p)),
             home_dir: home_dir.clone(),
             jj_config: env.jj_config.as_ref().map(|p| {
                 join_paths(split_paths(p).map(|p| {
@@ -1752,9 +1728,12 @@ mod tests {
         ConfigEnv {
             home_dir,
             repo_path: None,
-            user_config_paths: env.resolve(&Ui::null()),
+            workspace_path: None,
+            user_config_paths: env.resolve(),
             repo_config_path: None,
+            workspace_config_path: None,
             command: None,
+            hostname: None,
         }
     }
 }

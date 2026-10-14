@@ -3,7 +3,6 @@ use std::collections::HashSet;
 use clap_complete::ArgValueCompleter;
 use itertools::Itertools as _;
 use jj_lib::backend::BackendError;
-use jj_lib::revset::RevsetExpression;
 
 use crate::cli_util::CommandHelper;
 use crate::cli_util::RevisionArg;
@@ -24,24 +23,17 @@ use crate::ui::Ui;
 pub(crate) struct SimplifyParentsArgs {
     /// Simplify specified revision(s) together with their trees of descendants
     /// (can be repeated)
-    #[arg(
-        long,
-        short,
-        value_name = "REVSETS",
-        add = ArgValueCompleter::new(complete::revset_expression_mutable),
-    )]
+    #[arg(long, short, value_name = "REVSETS")]
+    #[arg(add = ArgValueCompleter::new(complete::revset_expression_mutable))]
     source: Vec<RevisionArg>,
+
     /// Simplify specified revision(s) (can be repeated)
     ///
     /// If both `--source` and `--revisions` are not provided, this defaults to
     /// the `revsets.simplify-parents` setting, or `reachable(@, mutable())`
     /// if it is not set.
-    #[arg(
-        long,
-        short,
-        value_name = "REVSETS",
-        add = ArgValueCompleter::new(complete::revset_expression_mutable),
-    )]
+    #[arg(long, short, value_name = "REVSETS")]
+    #[arg(add = ArgValueCompleter::new(complete::revset_expression_mutable))]
     revisions: Vec<RevisionArg>,
 }
 
@@ -57,25 +49,23 @@ pub(crate) fn cmd_simplify_parents(
             .get_string("revsets.simplify-parents")?;
         workspace_command
             .parse_revset(ui, &RevisionArg::from(revs))?
-            .expression()
-            .clone()
+            .resolve()?
     } else {
-        RevsetExpression::descendants(
-            workspace_command
-                .parse_union_revsets(ui, &args.source)?
-                .expression(),
-        )
-        .union(
-            workspace_command
-                .parse_union_revsets(ui, &args.revisions)?
-                .expression(),
-        )
+        workspace_command
+            .parse_union_revsets(ui, &args.source)?
+            .resolve()?
+            .descendants()
+            .union(
+                &workspace_command
+                    .parse_union_revsets(ui, &args.revisions)?
+                    .resolve()?,
+            )
     };
-    let commit_ids: Vec<_> = workspace_command
-        .attach_revset_evaluator(revs)
-        .evaluate_to_commit_ids()?
+    workspace_command.check_rewritable_expr(&revs)?;
+    let commit_ids: Vec<_> = revs
+        .evaluate(workspace_command.repo().as_ref())?
+        .iter()
         .try_collect()?;
-    workspace_command.check_rewritable(&commit_ids)?;
     let commit_ids_set: HashSet<_> = commit_ids.iter().cloned().collect();
     let num_orig_commits = commit_ids.len();
 
@@ -85,7 +75,7 @@ pub(crate) fn cmd_simplify_parents(
     let mut reparented_descendants = 0;
 
     tx.repo_mut()
-        .transform_descendants(commit_ids, |mut rewriter| {
+        .transform_descendants(commit_ids, async |mut rewriter| {
             let num_old_heads = rewriter.new_parents().len();
             if commit_ids_set.contains(rewriter.old_commit().id()) && num_old_heads > 1 {
                 // TODO: BackendError is not the right error here because
@@ -109,19 +99,18 @@ pub(crate) fn cmd_simplify_parents(
             Ok(())
         })?;
 
-    if let Some(mut formatter) = ui.status_formatter() {
-        if simplified_commits > 0 {
+    if let Some(mut formatter) = ui.status_formatter()
+        && simplified_commits > 0
+    {
+        writeln!(
+            formatter,
+            "Removed {edges} edges from {simplified_commits} out of {num_orig_commits} commits.",
+        )?;
+        if reparented_descendants > 0 {
             writeln!(
                 formatter,
-                "Removed {edges} edges from {simplified_commits} out of {num_orig_commits} \
-                 commits.",
+                "Rebased {reparented_descendants} descendant commits",
             )?;
-            if reparented_descendants > 0 {
-                writeln!(
-                    formatter,
-                    "Rebased {reparented_descendants} descendant commits",
-                )?;
-            }
         }
     }
     tx.finish(ui, format!("simplify {num_orig_commits} commits"))?;

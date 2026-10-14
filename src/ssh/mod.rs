@@ -343,10 +343,10 @@ fn verify_host(session: &Session, options: &Options) -> Result<()> {
             .encode(Sha256::digest(key))
             .trim_end_matches('=')
             .to_owned();
-        let answer = rpassword::prompt_password(format!(
+        let answer = crate::prompt::read(&format!(
             "Trust SSH host {}:{} with fingerprint SHA256:{fingerprint}? Type yes: ",
             options.host_key_alias, options.port
-        )).map_err(|_| "unknown SSH host key; verify and add it to known_hosts or use an interactive terminal")?;
+        ), false).map_err(|_| "unknown SSH host key; verify and add it to known_hosts or use an interactive terminal")?;
         if answer != "yes" {
             return Err("SSH host key was not accepted".into());
         }
@@ -425,7 +425,7 @@ fn authenticate(session: &Session, options: &Options, passwords: &PasswordCache)
             "publickey" if authenticate_keys(session, options, passwords)? => return Ok(()),
             "password" if !options.batch && enabled("passwordauthentication") => {
                 let password = Zeroizing::new(
-                    rpassword::prompt_password(format!(
+                    crate::prompt::password(format!(
                         "SSH password for {}@{}: ",
                         options.user, options.host
                     ))
@@ -473,8 +473,8 @@ impl ssh2::KeyboardInteractivePrompt for NativePrompts {
         prompts
             .iter()
             .map(|prompt| {
-                // Use the controlling terminal and suppress echo for every response.
-                rpassword::prompt_password(prompt.text.as_ref()).unwrap_or_else(|_| {
+                // Honor server echo hints through the native terminal or private UI channel.
+                crate::prompt::read(prompt.text.as_ref(), !prompt.echo).unwrap_or_else(|_| {
                     self.error = true;
                     String::new()
                 })
@@ -552,10 +552,10 @@ fn authenticate_keys(
                 continue;
             }
             for _ in 0..3 {
-                let password = Zeroizing::new(rpassword::prompt_password(format!(
+                let password = Zeroizing::new(crate::prompt::password(format!(
                     "Passphrase for SSH key {}: ",
                     path.display()
-                )).map_err(|_| "encrypted SSH key requires an interactive terminal or an unlocked agent")?);
+                )).map_err(|error| format!("SSH key passphrase unavailable: {error}; use a credential UI, terminal, or unlocked agent"))?);
                 if session
                     .userauth_pubkey_file(&options.user, None, path, Some(&password))
                     .is_ok()

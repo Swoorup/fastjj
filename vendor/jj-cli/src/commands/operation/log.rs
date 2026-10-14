@@ -16,32 +16,28 @@ use std::slice;
 
 use clap_complete::ArgValueCandidates;
 use itertools::Itertools as _;
-use jj_lib::config::ConfigGetError;
-use jj_lib::config::ConfigGetResultExt as _;
-use jj_lib::graph::reverse_graph;
 use jj_lib::graph::GraphEdge;
+use jj_lib::graph::reverse_graph;
 use jj_lib::op_store::OpStoreError;
 use jj_lib::op_walk;
 use jj_lib::operation::Operation;
 use jj_lib::repo::RepoLoader;
-use jj_lib::settings::UserSettings;
 
 use super::diff::show_op_diff;
-use crate::cli_util::format_template;
 use crate::cli_util::CommandHelper;
 use crate::cli_util::LogContentFormat;
 use crate::cli_util::WorkspaceCommandEnvironment;
+use crate::cli_util::format_template;
 use crate::command_error::CommandError;
-use crate::commit_templater::CommitTemplatePropertyKind;
 use crate::complete;
-use crate::diff_util::diff_formats_for_log;
 use crate::diff_util::DiffFormatArgs;
 use crate::diff_util::DiffRenderer;
+use crate::diff_util::diff_formats_for_log;
 use crate::formatter::Formatter;
-use crate::graphlog::get_graphlog;
 use crate::graphlog::GraphStyle;
+use crate::graphlog::get_graphlog;
 use crate::operation_templater::OperationTemplateLanguage;
-use crate::operation_templater::OperationTemplatePropertyKind;
+use crate::templater::TemplateRenderer;
 use crate::ui::Ui;
 
 /// Show the operation log
@@ -57,12 +53,15 @@ pub struct OperationLogArgs {
     /// reversed.
     #[arg(long, short = 'n')]
     limit: Option<usize>,
+
     /// Show operations in the opposite order (older operations first)
     #[arg(long)]
     reversed: bool,
+
     /// Don't show the graph, show a flat list of operations
-    #[arg(long)]
+    #[arg(long, short = 'G')]
     no_graph: bool,
+
     /// Render each operation using the given template
     ///
     /// You can specify arbitrary template expressions using the
@@ -70,15 +69,18 @@ pub struct OperationLogArgs {
     /// information.
     ///
     /// [built-in keywords]:
-    ///     https://jj-vcs.github.io/jj/latest/templates/#operation-keywords
+    ///     https://docs.jj-vcs.dev/latest/templates/#operation-keywords
     ///
     /// [`jj help -k templates`]:
-    ///     https://jj-vcs.github.io/jj/latest/templates/
-    #[arg(long, short = 'T', add = ArgValueCandidates::new(complete::template_aliases))]
+    ///     https://docs.jj-vcs.dev/latest/templates/
+    #[arg(long, short = 'T')]
+    #[arg(add = ArgValueCandidates::new(complete::template_aliases))]
     template: Option<String>,
+
     /// Show changes to the repository at each operation
     #[arg(long, short = 'd')]
     op_diff: bool,
+
     /// Show patch of modifications to changes (implies --op-diff)
     ///
     /// If the previous version has different parents, it will be temporarily
@@ -86,6 +88,7 @@ pub struct OperationLogArgs {
     /// contaminated by unrelated changes.
     #[arg(long, short = 'p')]
     patch: bool,
+
     #[command(flatten)]
     diff_format: DiffFormatArgs,
 }
@@ -123,8 +126,8 @@ fn do_op_log(
     let graph_style = GraphStyle::from_settings(settings)?;
     let with_content_format = LogContentFormat::new(ui, settings)?;
 
-    let template;
-    let op_node_template;
+    let template: TemplateRenderer<Operation>;
+    let op_node_template: TemplateRenderer<Operation>;
     {
         let language = OperationTemplateLanguage::new(
             repo_loader,
@@ -136,22 +139,15 @@ fn do_op_log(
             None => settings.get_string("templates.op_log")?,
         };
         template = workspace_env
-            .parse_template(
-                ui,
-                &language,
-                &text,
-                OperationTemplatePropertyKind::wrap_operation,
-            )?
-            .labeled("operation")
-            .labeled("op_log");
+            .parse_template(ui, &language, &text)?
+            .labeled(["op_log", "operation"]);
         op_node_template = workspace_env
             .parse_template(
                 ui,
                 &language,
-                &get_node_template(graph_style, settings)?,
-                OperationTemplatePropertyKind::wrap_operation,
+                &settings.get_string("templates.op_log_node")?,
             )?
-            .labeled("node");
+            .labeled(["op_log", "operation", "node"]);
     }
 
     let diff_formats = diff_formats_for_log(settings, &args.diff_format, args.patch)?;
@@ -161,21 +157,18 @@ fn do_op_log(
                          formatter: &mut dyn Formatter,
                          op: &Operation,
                          with_content_format: &LogContentFormat| {
-            let parents: Vec<_> = op.parents().try_collect()?;
-            let parent_op = repo_loader.merge_operations(parents, None)?;
-            let parent_repo = repo_loader.load_at(&parent_op)?;
+            let parent_ops: Vec<_> = op.parents().try_collect()?;
+            let merged_parent_op = repo_loader.merge_operations(parent_ops.clone(), None)?;
+            let parent_repo = repo_loader.load_at(&merged_parent_op)?;
             let repo = repo_loader.load_at(op)?;
 
             let id_prefix_context = workspace_env.new_id_prefix_context();
             let commit_summary_template = {
                 let language =
                     workspace_env.commit_template_language(repo.as_ref(), &id_prefix_context);
-                workspace_env.parse_template(
-                    ui,
-                    &language,
-                    &template_text,
-                    CommitTemplatePropertyKind::wrap_commit,
-                )?
+                workspace_env
+                    .parse_template(ui, &language, &template_text)?
+                    .labeled(["op_log", "commit"])
             };
             let path_converter = workspace_env.path_converter();
             let conflict_marker_style = workspace_env.conflict_marker_style();
@@ -188,6 +181,11 @@ fn do_op_log(
                 )
             });
 
+            // TODO: Merged repo may have newly rebased commits, which wouldn't
+            // exist in the index. (#4465)
+            if parent_ops.len() > 1 {
+                return Ok(());
+            }
             show_op_diff(
                 ui,
                 formatter,
@@ -232,9 +230,6 @@ fn do_op_log(
             within_graph.write(ui.new_formatter(&mut buffer).as_mut(), |formatter| {
                 template.format(&op, formatter)
             })?;
-            if !buffer.ends_with(b"\n") {
-                buffer.push(b'\n');
-            }
             if let Some(show) = &maybe_show_op_diff {
                 let mut formatter = ui.new_formatter(&mut buffer);
                 show(ui, formatter.as_mut(), &op, &within_graph)?;
@@ -263,14 +258,4 @@ fn do_op_log(
     }
 
     Ok(())
-}
-
-fn get_node_template(style: GraphStyle, settings: &UserSettings) -> Result<String, ConfigGetError> {
-    let symbol = settings.get_string("templates.op_log_node").optional()?;
-    let default = if style.is_ascii() {
-        "builtin_op_log_node_ascii"
-    } else {
-        "builtin_op_log_node"
-    };
-    Ok(symbol.unwrap_or_else(|| default.to_owned()))
 }

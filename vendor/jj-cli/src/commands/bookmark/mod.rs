@@ -22,37 +22,41 @@ mod set;
 mod track;
 mod untrack;
 
+use std::io;
+
 use itertools::Itertools as _;
 use jj_lib::backend::CommitId;
+use jj_lib::iter_util::fallible_any;
 use jj_lib::op_store::RefTarget;
 use jj_lib::op_store::RemoteRef;
 use jj_lib::ref_name::RefName;
+use jj_lib::ref_name::RemoteName;
 use jj_lib::ref_name::RemoteRefSymbol;
 use jj_lib::repo::Repo;
-use jj_lib::str_util::StringPattern;
+use jj_lib::str_util::StringExpression;
+use jj_lib::str_util::StringMatcher;
 use jj_lib::view::View;
 
-use self::create::cmd_bookmark_create;
 use self::create::BookmarkCreateArgs;
-use self::delete::cmd_bookmark_delete;
+use self::create::cmd_bookmark_create;
 use self::delete::BookmarkDeleteArgs;
-use self::forget::cmd_bookmark_forget;
+use self::delete::cmd_bookmark_delete;
 use self::forget::BookmarkForgetArgs;
-use self::list::cmd_bookmark_list;
+use self::forget::cmd_bookmark_forget;
 use self::list::BookmarkListArgs;
-use self::r#move::cmd_bookmark_move;
+use self::list::cmd_bookmark_list;
 use self::r#move::BookmarkMoveArgs;
-use self::rename::cmd_bookmark_rename;
+use self::r#move::cmd_bookmark_move;
 use self::rename::BookmarkRenameArgs;
-use self::set::cmd_bookmark_set;
+use self::rename::cmd_bookmark_rename;
 use self::set::BookmarkSetArgs;
-use self::track::cmd_bookmark_track;
+use self::set::cmd_bookmark_set;
 use self::track::BookmarkTrackArgs;
-use self::untrack::cmd_bookmark_untrack;
+use self::track::cmd_bookmark_track;
 use self::untrack::BookmarkUntrackArgs;
+use self::untrack::cmd_bookmark_untrack;
 use crate::cli_util::CommandHelper;
 use crate::cli_util::RemoteBookmarkNamePattern;
-use crate::command_error::user_error;
 use crate::command_error::CommandError;
 use crate::ui::Ui;
 
@@ -64,7 +68,7 @@ use crate::ui::Ui;
 /// See [`jj help -k bookmarks`] for more information.
 ///
 /// [`jj help -k bookmarks`]:
-///     https://jj-vcs.github.io/jj/latest/bookmarks
+///     https://docs.jj-vcs.dev/latest/bookmarks
 #[derive(clap::Subcommand, Clone, Debug)]
 pub enum BookmarkCommand {
     #[command(visible_alias("c"))]
@@ -104,85 +108,131 @@ pub fn cmd_bookmark(
     }
 }
 
-fn find_local_bookmarks<'a>(
-    view: &'a View,
-    name_patterns: &[StringPattern],
-) -> Result<Vec<(&'a RefName, &'a RefTarget)>, CommandError> {
-    find_bookmarks_with(name_patterns, |pattern| {
-        view.local_bookmarks_matching(pattern).map(Ok)
-    })
-}
-
-fn find_bookmarks_with<'a, 'b, V, I>(
-    name_patterns: &'b [StringPattern],
-    mut find_matches: impl FnMut(&'b StringPattern) -> I,
-) -> Result<Vec<(&'a RefName, V)>, CommandError>
-where
-    I: Iterator<Item = Result<(&'a RefName, V), CommandError>>,
-{
-    let mut matching_bookmarks: Vec<(&'a RefName, V)> = vec![];
-    let mut unmatched_patterns = vec![];
-    for pattern in name_patterns {
-        let mut matches = find_matches(pattern).peekable();
-        if matches.peek().is_none() {
-            unmatched_patterns.push(pattern);
-        }
-        matches.process_results(|iter| matching_bookmarks.extend(iter))?;
-    }
-    match &unmatched_patterns[..] {
-        [] => {
-            matching_bookmarks.sort_unstable_by_key(|(name, _)| *name);
-            matching_bookmarks.dedup_by_key(|(name, _)| *name);
-            Ok(matching_bookmarks)
-        }
-        [pattern] if pattern.is_exact() => Err(user_error(format!("No such bookmark: {pattern}"))),
-        patterns => Err(user_error(format!(
-            "No matching bookmarks for patterns: {}",
-            patterns.iter().join(", ")
-        ))),
-    }
-}
-
-fn find_remote_bookmarks<'a>(
+fn find_trackable_remote_bookmarks<'a>(
+    ui: &Ui,
     view: &'a View,
     name_patterns: &[RemoteBookmarkNamePattern],
 ) -> Result<Vec<(RemoteRefSymbol<'a>, &'a RemoteRef)>, CommandError> {
     let mut matching_bookmarks = vec![];
-    let mut unmatched_patterns = vec![];
+    let mut unmatched_symbols = vec![];
     for pattern in name_patterns {
-        let mut matches = view
-            .remote_bookmarks_matching(&pattern.bookmark, &pattern.remote)
-            .peekable();
+        let bookmark_matcher = pattern.bookmark.to_matcher();
+        let remote_matcher = pattern.remote.to_matcher();
+        let mut matches =
+            trackable_remote_bookmarks_matching(view, &bookmark_matcher, &remote_matcher)
+                .peekable();
         if matches.peek().is_none() {
-            unmatched_patterns.push(pattern);
+            unmatched_symbols.extend(pattern.as_exact());
         }
         matching_bookmarks.extend(matches);
     }
-    match &unmatched_patterns[..] {
-        [] => {
-            matching_bookmarks.sort_unstable_by(|(sym1, _), (sym2, _)| sym1.cmp(sym2));
-            matching_bookmarks.dedup_by(|(sym1, _), (sym2, _)| sym1 == sym2);
-            Ok(matching_bookmarks)
-        }
-        [pattern] if pattern.is_exact() => {
-            Err(user_error(format!("No such remote bookmark: {pattern}")))
-        }
-        patterns => Err(user_error(format!(
-            "No matching remote bookmarks for patterns: {}",
-            patterns.iter().join(", ")
-        ))),
+    matching_bookmarks.sort_unstable_by(|(sym1, _), (sym2, _)| sym1.cmp(sym2));
+    matching_bookmarks.dedup_by(|(sym1, _), (sym2, _)| sym1 == sym2);
+    if !unmatched_symbols.is_empty() {
+        writeln!(
+            ui.warning_default(),
+            "No matching remote bookmarks for names: {}",
+            unmatched_symbols.iter().join(", ")
+        )?;
     }
+    Ok(matching_bookmarks)
 }
 
-fn is_fast_forward(repo: &dyn Repo, old_target: &RefTarget, new_target_id: &CommitId) -> bool {
+fn trackable_remote_bookmarks_matching<'a>(
+    view: &'a View,
+    bookmark_matcher: &StringMatcher,
+    remote_matcher: &StringMatcher,
+) -> impl Iterator<Item = (RemoteRefSymbol<'a>, &'a RemoteRef)> {
+    let present_or_tracked_matches =
+        view.remote_bookmarks_matching(bookmark_matcher, remote_matcher);
+    let absent_matches =
+        view.remote_views_matching(remote_matcher)
+            .flat_map(move |(remote, remote_view)| {
+                view.local_bookmarks_matching(bookmark_matcher)
+                    .filter(|&(name, _)| !remote_view.bookmarks.contains_key(name))
+                    .map(|(name, _)| (name.to_remote_symbol(remote), RemoteRef::absent_ref()))
+            });
+    itertools::chain(present_or_tracked_matches, absent_matches)
+}
+
+fn is_fast_forward(
+    repo: &dyn Repo,
+    old_target: &RefTarget,
+    new_target_id: &CommitId,
+) -> Result<bool, CommandError> {
     if old_target.is_present() {
         // Strictly speaking, "all" old targets should be ancestors, but we allow
         // conflict resolution by setting bookmark to "any" of the old target
         // descendants.
-        old_target
-            .added_ids()
-            .any(|old| repo.index().is_ancestor(old, new_target_id))
+        let found = fallible_any(old_target.added_ids(), |old| {
+            repo.index().is_ancestor(old, new_target_id)
+        })?;
+        Ok(found)
     } else {
-        true
+        Ok(true)
     }
+}
+
+/// Warns about exact patterns that don't match local bookmarks.
+fn warn_unmatched_local_bookmarks(
+    ui: &Ui,
+    view: &View,
+    name_expr: &StringExpression,
+) -> io::Result<()> {
+    let mut names = name_expr
+        .exact_strings()
+        .map(RefName::new)
+        .filter(|name| view.get_local_bookmark(name).is_absent())
+        .peekable();
+    if names.peek().is_none() {
+        return Ok(());
+    }
+    writeln!(
+        ui.warning_default(),
+        "No matching bookmarks for names: {}",
+        names.map(|name| name.as_symbol()).join(", ")
+    )
+}
+
+/// Warns about exact patterns that don't match local or remote bookmarks.
+fn warn_unmatched_local_or_remote_bookmarks(
+    ui: &Ui,
+    view: &View,
+    name_expr: &StringExpression,
+) -> io::Result<()> {
+    let mut names = name_expr
+        .exact_strings()
+        .map(RefName::new)
+        .filter(|&name| {
+            view.get_local_bookmark(name).is_absent()
+                && view
+                    .remote_views()
+                    .all(|(_, remote_view)| !remote_view.bookmarks.contains_key(name))
+        })
+        .peekable();
+    if names.peek().is_none() {
+        return Ok(());
+    }
+    writeln!(
+        ui.warning_default(),
+        "No matching bookmarks for names: {}",
+        names.map(|name| name.as_symbol()).join(", ")
+    )
+}
+
+/// Warns about exact patterns that don't match remotes.
+fn warn_unmatched_remotes(ui: &Ui, view: &View, name_expr: &StringExpression) -> io::Result<()> {
+    let mut names = name_expr
+        .exact_strings()
+        .map(RemoteName::new)
+        .filter(|name| view.get_remote_view(name).is_none())
+        .peekable();
+    if names.peek().is_none() {
+        return Ok(());
+    }
+    writeln!(
+        ui.warning_default(),
+        "No matching remotes for names: {}",
+        names.map(|name| name.as_symbol()).join(", ")
+    )
 }

@@ -16,16 +16,16 @@ use clap_complete::ArgValueCandidates;
 use clap_complete::ArgValueCompleter;
 use jj_lib::annotate::FileAnnotation;
 use jj_lib::annotate::FileAnnotator;
+use jj_lib::annotate::LineOrigin;
 use jj_lib::repo::Repo;
 use jj_lib::revset::RevsetExpression;
 use tracing::instrument;
 
 use crate::cli_util::CommandHelper;
 use crate::cli_util::RevisionArg;
-use crate::command_error::user_error;
 use crate::command_error::CommandError;
+use crate::command_error::user_error;
 use crate::commit_templater::AnnotationLine;
-use crate::commit_templater::CommitTemplatePropertyKind;
 use crate::complete;
 use crate::templater::TemplateRenderer;
 use crate::ui::Ui;
@@ -37,19 +37,15 @@ use crate::ui::Ui;
 #[derive(clap::Args, Clone, Debug)]
 pub(crate) struct FileAnnotateArgs {
     /// the file to annotate
-    #[arg(
-        value_hint = clap::ValueHint::AnyPath,
-        add = ArgValueCompleter::new(complete::all_revision_files),
-    )]
+    #[arg(value_hint = clap::ValueHint::AnyPath)]
+    #[arg(add = ArgValueCompleter::new(complete::all_revision_files))]
     path: String,
+
     /// an optional revision to start at
-    #[arg(
-        long,
-        short,
-        value_name = "REVSET",
-        add = ArgValueCompleter::new(complete::revset_expression_all),
-    )]
+    #[arg(long, short, value_name = "REVSET")]
+    #[arg(add = ArgValueCompleter::new(complete::revset_expression_all))]
     revision: Option<RevisionArg>,
+
     /// Render each line using the given template
     ///
     /// All 0-argument methods of the [`AnnotationLine` type] are available as
@@ -60,11 +56,12 @@ pub(crate) struct FileAnnotateArgs {
     /// setting.
     ///
     /// [`AnnotationLine` type]:
-    ///     https://jj-vcs.github.io/jj/latest/templates/#annotationline-type
+    ///     https://docs.jj-vcs.dev/latest/templates/#annotationline-type
     ///
     /// [`jj help -k templates`]:
-    ///     https://jj-vcs.github.io/jj/latest/templates/
-    #[arg(long, short = 'T', add = ArgValueCandidates::new(complete::template_aliases))]
+    ///     https://docs.jj-vcs.dev/latest/templates/
+    #[arg(long, short = 'T')]
+    #[arg(add = ArgValueCandidates::new(complete::template_aliases))]
     template: Option<String>,
 }
 
@@ -79,12 +76,13 @@ pub(crate) fn cmd_file_annotate(
     let starting_commit = workspace_command
         .resolve_single_rev(ui, args.revision.as_ref().unwrap_or(&RevisionArg::AT))?;
     let file_path = workspace_command.parse_file_path(&args.path)?;
-    let file_value = starting_commit.tree()?.path_value(&file_path)?;
+    let file_value = starting_commit.tree().path_value(&file_path)?;
     let ui_path = workspace_command.format_file_path(&file_path);
+
     if file_value.is_absent() {
         return Err(user_error(format!("No such path: {ui_path}")));
     }
-    if file_value.is_tree() {
+    if file_value.to_file_merge().is_none() {
         return Err(user_error(format!(
             "Path exists but is not a regular file: {ui_path}"
         )));
@@ -97,12 +95,7 @@ pub(crate) fn cmd_file_annotate(
             .get_string("templates.file_annotate")?,
     };
     let language = workspace_command.commit_template_language();
-    let template = workspace_command.parse_template(
-        ui,
-        &language,
-        &template_text,
-        CommitTemplatePropertyKind::wrap_annotation_line,
-    )?;
+    let template = workspace_command.parse_template(ui, &language, &template_text)?;
 
     // TODO: Should we add an option to limit the domain to e.g. recent commits?
     // Note that this is probably different from "--skip REVS", which won't
@@ -125,23 +118,27 @@ fn render_file_annotation(
     ui.request_pager();
     let mut formatter = ui.stdout_formatter();
     let mut last_id = None;
-    let default_id = repo.store().root_commit_id();
-    for (line_number, (commit_id, content)) in annotation.lines().enumerate() {
-        /* At least in cases where the repository was jj-initialized shallowly,
-        then unshallow'd with git, some changes will not have a commit id
-        because jj does not import the unshallow'd commits. So we default
-        to the root commit id for now. */
-        let commit_id = commit_id.unwrap_or(default_id);
-        let commit = repo.store().get_commit(commit_id)?;
-        let first_line_in_hunk = last_id != Some(commit_id);
+    // At least in cases where the repository was jj-initialized shallowly,
+    // then unshallow'd with git, some changes will not have a commit id
+    // because jj does not import the unshallow'd commits. So we default
+    // to the root commit id for now.
+    let default_line_origin = LineOrigin {
+        commit_id: repo.store().root_commit_id().clone(),
+        line_number: 0,
+    };
+    for (line_number, (line_origin, content)) in annotation.line_origins().enumerate() {
+        let line_origin = line_origin.unwrap_or(&default_line_origin);
+        let commit = repo.store().get_commit(&line_origin.commit_id)?;
+        let first_line_in_hunk = last_id != Some(&line_origin.commit_id);
         let annotation_line = AnnotationLine {
             commit,
             content: content.to_owned(),
             line_number: line_number + 1,
+            original_line_number: line_origin.line_number + 1,
             first_line_in_hunk,
         };
         template_render.format(&annotation_line, formatter.as_mut())?;
-        last_id = Some(commit_id);
+        last_id = Some(&line_origin.commit_id);
     }
 
     Ok(())

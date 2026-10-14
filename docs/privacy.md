@@ -20,6 +20,19 @@ stdin and are handed to the embedded CLI in memory. The OS's argv view contains
 only the executable and `--request-stdin`, not the request. The ordinary command
 mode makes no promise to conceal arguments the caller supplied in argv.
 
+## jjui boundary
+
+`fastjjui` starts each backend child as `fastjj --request-fd`. Command arguments
+and cwd travel through descriptor 3; background credential prompts use an
+inherited Unix stream socket at descriptor 4. stdin remains available for inline
+descriptions. There is no askpass subprocess or named credential socket.
+
+The UI itself can create processes. Its single backend command factory, disabled
+shell/Lua process APIs, and fixed-argument clipboard utilities enforce argument
+privacy at that boundary. Every backend child independently installs the kernel
+policy described here. Unmodified upstream jjui does not provide this guarantee.
+See [the jjui guide](jjui.md) for the protocol, restrictions, and verification.
+
 ## Linux kernel enforcement
 
 The filter sets `PR_SET_NO_NEW_PRIVS` and uses

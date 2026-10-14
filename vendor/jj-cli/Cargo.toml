@@ -10,10 +10,10 @@
 # See Cargo.toml.orig for the original contents.
 
 [package]
-edition = "2021"
-rust-version = "1.84"
+edition = "2024"
+rust-version = "1.89"
 name = "jj-cli"
-version = "0.29.0"
+version = "0.37.0"
 build = "build.rs"
 include = [
     "/LICENSE",
@@ -33,8 +33,8 @@ autoexamples = false
 autotests = false
 autobenches = false
 description = "Jujutsu - an experimental version control system"
-homepage = "https://github.com/jj-vcs/jj"
-documentation = "https://jj-vcs.github.io/jj/"
+homepage = "https://www.jj-vcs.dev/"
+documentation = "https://docs.jj-vcs.dev/"
 readme = false
 keywords = [
     "VCS",
@@ -45,51 +45,80 @@ keywords = [
 ]
 license = "Apache-2.0"
 repository = "https://github.com/jj-vcs/jj"
-resolver = "3"
 
 [package.metadata.binstall]
 pkg-url = "{ repo }/releases/download/v{ version }/jj-v{ version }-{ target }.{ archive-format }"
+
+[package.metadata.deb]
+name = "jj"
+maintainer = "Unspecified Debian Maintainer <nobody@example.com>"
+copyright = "Copyright 2025 The Jujutsu Authors"
+license-file = "LICENSE"
+section = "vcs"
+priority = "optional"
+extended-description = "Distributed Version Control System inspired by Git, Mercurial and Darcs."
+default-features = true
+
+[[package.metadata.deb.assets]]
+source = "docs/*"
+dest = "usr/share/doc/jj/"
+mode = "644"
+
+[[package.metadata.deb.assets]]
+source = "docs/*/*"
+dest = "usr/share/doc/jj/"
+mode = "644"
+
+[[package.metadata.deb.assets]]
+source = "target/release/jj"
+dest = "usr/bin/"
+mode = "755"
 
 [features]
 bench = ["dep:criterion"]
 default = [
     "watchman",
     "git",
-    "git2",
 ]
 git = [
     "jj-lib/git",
     "dep:gix",
 ]
-git2 = [
-    "git",
-    "jj-lib/git2",
-    "dep:git2",
-]
 test-fakes = ["jj-lib/testing"]
-vendored-openssl = [
-    "git2/vendored-openssl",
-    "jj-lib/vendored-openssl",
-]
 watchman = ["jj-lib/watchman"]
 
 [lib]
 name = "jj_cli"
 path = "src/lib.rs"
 
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 [dependencies.bstr]
-version = "1.11.3"
+version = "1.12.1"
 
 [dependencies.chrono]
-version = "0.4.41"
+version = "0.4.42"
 features = [
     "std",
     "clock",
+    "serde",
 ]
 default-features = false
 
 [dependencies.clap]
-version = "4.5.37"
+version = "4.5.54"
 features = [
     "derive",
     "deprecated",
@@ -101,40 +130,38 @@ features = [
 version = "=0.1.5"
 
 [dependencies.clap_complete]
-version = "4.5.48"
+version = "4.5.64"
 features = ["unstable-dynamic"]
 
 [dependencies.clap_complete_nushell]
-version = "4.5.5"
+version = "4.5.10"
 
 [dependencies.clap_mangen]
 version = "0.2.25"
 
 [dependencies.criterion]
-version = "0.5.1"
+version = "0.8.1"
 optional = true
 
 [dependencies.crossterm]
-version = "0.28"
+version = "0.29"
 features = ["windows"]
 default-features = false
 
 [dependencies.dunce]
 version = "1.0.5"
 
+[dependencies.erased-serde]
+version = "0.4.9"
+
 [dependencies.etcetera]
-version = "0.10.0"
+version = "0.11.0"
 
 [dependencies.futures]
 version = "0.3.31"
 
-[dependencies.git2]
-version = "0.20.1"
-features = ["vendored-libgit2"]
-optional = true
-
 [dependencies.gix]
-version = "0.71.0"
+version = "0.77.0"
 features = [
     "attributes",
     "blob-diff",
@@ -145,21 +172,21 @@ features = [
 optional = true
 default-features = false
 
-[dependencies.glob]
-version = "0.3.2"
+[dependencies.globset]
+version = "0.4.18"
 
 [dependencies.indexmap]
-version = "2.9.0"
+version = "2.12.1"
 features = ["serde"]
 
 [dependencies.indoc]
-version = "2.0.6"
+version = "2.0.7"
 
 [dependencies.itertools]
 version = "0.14.0"
 
 [dependencies.jj-lib]
-version = "0.29.0"
+version = "0.37.0"
 default-features = false
 
 [dependencies.maplit]
@@ -168,14 +195,11 @@ version = "1.0.2"
 [dependencies.once_cell]
 version = "1.21.3"
 
-[dependencies.os_pipe]
-version = "1.2.1"
-
 [dependencies.pest]
-version = "2.8.0"
+version = "2.8.5"
 
 [dependencies.pest_derive]
-version = "2.8.0"
+version = "2.8.5"
 
 [dependencies.pollster]
 version = "0.4.0"
@@ -184,7 +208,7 @@ version = "0.4.0"
 version = "1.10.0"
 
 [dependencies.regex]
-version = "1.11.1"
+version = "1.12.2"
 
 [dependencies.rpassword]
 version = "7.4.0"
@@ -193,49 +217,59 @@ version = "7.4.0"
 version = "0.1.0"
 
 [dependencies.sapling-streampager]
-version = "0.11.0"
+version = "0.11.2"
 
 [dependencies.scm-record]
-version = "0.8.0"
+version = "0.9.0"
 
 [dependencies.serde]
 version = "1.0"
-features = ["derive"]
+features = [
+    "derive",
+    "rc",
+]
 
 [dependencies.serde_json]
-version = "1.0.140"
+version = "1.0.148"
 
 [dependencies.slab]
-version = "0.4.9"
+version = "0.4.11"
 
 [dependencies.strsim]
 version = "0.11.1"
 
 [dependencies.tempfile]
-version = "3.19.1"
+version = "3.24.0"
 
 [dependencies.textwrap]
 version = "0.16.2"
 
 [dependencies.thiserror]
-version = "2.0.12"
+version = "2.0.17"
 
 [dependencies.timeago]
-version = "0.4.2"
+version = "0.5.0"
 default-features = false
 
+[dependencies.tokio]
+version = "1.49.0"
+features = ["io-util"]
+
+[dependencies.toml]
+version = "0.9.8"
+
 [dependencies.toml_edit]
-version = "0.22.26"
+version = "0.23.9"
 features = ["serde"]
 
 [dependencies.tracing]
-version = "0.1.41"
+version = "0.1.44"
 
 [dependencies.tracing-chrome]
 version = "0.7.2"
 
 [dependencies.tracing-subscriber]
-version = "0.3.19"
+version = "0.3.22"
 features = [
     "std",
     "ansi",
@@ -248,17 +282,58 @@ default-features = false
 version = "0.2.0"
 
 [dependencies.whoami]
-version = "1.6.0"
+version = "2.0.0"
+
+[dev-dependencies.assert_cmd]
+version = "2.1.1"
+
+[dev-dependencies.assert_matches]
+version = "1.5.0"
+
+[dev-dependencies.async-trait]
+version = "0.1.89"
+
+[dev-dependencies.datatest-stable]
+version = "0.3.3"
+
+[dev-dependencies.insta]
+version = "1.46.0"
+features = ["filters"]
+
+[dev-dependencies.jsonschema]
+version = "0.38.1"
+default-features = false
+
+[dev-dependencies.proptest]
+version = "1.9.0"
+
+[dev-dependencies.proptest-state-machine]
+version = "0.6.0"
+
+[dev-dependencies.test-case]
+version = "3.3.1"
 
 [target."cfg(unix)".dependencies.libc]
-version = "0.2.172"
+version = "0.2.178"
 
 [lints.clippy]
+borrow_as_ptr = "warn"
+cast_lossless = "warn"
+explicit_into_iter_loop = "warn"
 explicit_iter_loop = "warn"
 flat_map_option = "warn"
 implicit_clone = "warn"
 needless_for_each = "warn"
+ptr_as_ptr = "warn"
+ptr_cast_constness = "warn"
+ref_as_ptr = "warn"
 semicolon_if_nothing_returned = "warn"
 uninlined_format_args = "warn"
+unnecessary_literal_bound = "warn"
 unused_trait_names = "warn"
+use_self = "warn"
 useless_conversion = "warn"
+
+[lints.rust]
+let_underscore_drop = "warn"
+redundant_imports = "warn"

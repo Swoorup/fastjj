@@ -19,7 +19,7 @@ TARGETS = {
 }
 
 
-def package(root, binary, target, output, commit, tag=None):
+def package(root, binary, target, output, commit, tag=None, ui_binary=None):
     if target not in TARGETS:
         raise ValueError("unsupported release target")
     if not re.fullmatch(r"[0-9a-f]{40}", commit):
@@ -31,8 +31,9 @@ def package(root, binary, target, output, commit, tag=None):
         raise ValueError("release tag must equal v plus the Cargo.toml package version")
 
     name = f"fastjj-v{version}-{target}"
-    files = {"fastjj": binary.read_bytes()}
-    for filename in ["LICENSE", "NOTICE", "README.md", "docs/privacy.md"]:
+    files = {"fastjj": binary.read_bytes(), "fastjjui": (ui_binary or binary.with_name("fastjjui")).read_bytes()}
+    files["licenses/jjui-MIT.txt"] = (root / "vendor/jjui/LICENSE").read_bytes()
+    for filename in ["LICENSE", "NOTICE", "README.md", "docs/privacy.md", "docs/jjui.md"]:
         files[filename] = (root / filename).read_bytes()
     files["build-info.json"] = (json.dumps({
         "name":"fastjj", "version":version, "target":target, "source_commit":commit,
@@ -45,7 +46,7 @@ def package(root, binary, target, output, commit, tag=None):
                 for filename, data in sorted(files.items()):
                     entry = tarfile.TarInfo(f"{name}/{filename}")
                     entry.size = len(data)
-                    entry.mode = 0o755 if filename == "fastjj" else 0o644
+                    entry.mode = 0o755 if filename in ("fastjj", "fastjjui") else 0o644
                     entry.mtime = 0
                     tar.addfile(entry, io.BytesIO(data))
     digest = hashlib.sha256(archive.read_bytes()).hexdigest()
@@ -56,13 +57,14 @@ def package(root, binary, target, output, commit, tag=None):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--binary", type=Path, required=True)
+    parser.add_argument("--ui-binary", type=Path)
     parser.add_argument("--target", choices=sorted(TARGETS), required=True)
     parser.add_argument("--output", type=Path, default=Path("dist"))
     parser.add_argument("--commit", required=True)
     parser.add_argument("--tag")
     args = parser.parse_args()
     try:
-        archive = package(Path(__file__).resolve().parent.parent, args.binary, args.target, args.output, args.commit, args.tag)
+        archive = package(Path(__file__).resolve().parent.parent, args.binary, args.target, args.output, args.commit, args.tag, args.ui_binary)
     except (OSError, ValueError) as error:
         parser.error(str(error))
     print(archive)
