@@ -56,7 +56,11 @@ jobs:
       - name: Verify native HTTPS transport and certificate trust
         run: python3 scripts/verify_https_clone.py "target/$TARGET/release/fastjj"
       - if: runner.os == 'Linux'
-        run: sudo apt-get update && sudo apt-get install -y strace
+        run: |
+          sudo apt-get update && sudo apt-get install -y strace openssh-server
+          sudo install -d -m 0755 /run/sshd
+      - name: Verify native SSH authentication, configuration, tunnels, and privacy
+        run: python3 scripts/verify_ssh.py "target/$TARGET/release/fastjj"
       - if: runner.os == 'Linux'
         run: python3 scripts/verify_process_privacy.py "target/$TARGET/release/fastjj"
       - name: Test release packaging

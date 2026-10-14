@@ -77,6 +77,14 @@ sandbox and does not defend against a privileged debugger or an already-running
 service that the user instructs to perform work elsewhere. Existing authentication
 agents remain separate services and are not started by fastjj.
 
+Native SSH reads keys and configuration inside the process. Encrypted-key
+prompts use the controlling terminal with echo disabled; passphrases never
+enter argv or request environment variables. `ProxyJump` connections use worker
+threads and SSH direct-tcpip channels. Every hop verifies its own host key before
+authentication. Arbitrary command-based proxies and configuration conditions
+cannot execute. The remote SSH server receives the Git repository path and may
+run its own Git process; fastjj's process policy governs the local client.
+
 Avoid putting secrets in normal CLI arguments or remote URLs. Read requests from
 a protected file or an application-held pipe; do not embed their JSON in an
 invoking shell's command-line arguments. Output retains upstream jj semantics

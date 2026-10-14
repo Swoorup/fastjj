@@ -7,3 +7,6 @@ in-memory argument and configuration APIs and a native text-editor callback,
 and removes standalone binary/test declarations from
 the vendored manifest. The jj repository data model and storage code are
 provided by the unmodified, version-pinned jj-lib dependency.
+fastjj also replaces SSH transport with a native libgit2 smart transport, adds
+SSH configuration/key/agent handling and thread-based jump tunnels, and updates
+the vendored CLI's SSH error hint accordingly.
