@@ -3680,6 +3680,7 @@ pub fn format_template<C: Clone>(ui: &Ui, arg: &C, template: &TemplateRenderer<C
 pub struct CliRunner<'a> {
     // fastjj: arguments can arrive over stdin without changing process argv.
     input_args: Vec<OsString>,
+    config_overrides: Vec<ConfigLayer>,
     tracing_subscription: TracingSubscription,
     app: Command,
     config_layers: Vec<ConfigLayer>,
@@ -3712,6 +3713,7 @@ impl<'a> CliRunner<'a> {
         crate::cleanup_guard::init();
         CliRunner {
             input_args: env::args_os().collect(),
+            config_overrides: vec![],
             tracing_subscription,
             app: crate::commands::default_app(),
             config_layers: crate::config::default_config_layers(),
@@ -3731,6 +3733,14 @@ impl<'a> CliRunner<'a> {
     /// Supply arguments in memory, including argv[0], without spawning a process.
     pub fn with_args(mut self, args: Vec<OsString>) -> Self {
         self.input_args = args;
+        self
+    }
+
+    /// fastjj: apply embedding policy after user config without injecting argv.
+    pub fn with_config_overrides(mut self, text: &str) -> Self {
+        self.config_overrides.push(
+            ConfigLayer::parse(ConfigSource::CommandArg, text).expect("valid embedding configuration"),
+        );
         self
     }
 
@@ -3903,6 +3913,7 @@ impl<'a> CliRunner<'a> {
             config_env.reset_repo_path(loader.repo_path());
             config_env.reload_repo_config(&mut raw_config)?;
         }
+        raw_config.as_mut().extend_layers(self.config_overrides.iter().cloned());
         let mut config = config_env.resolve_config(&raw_config)?;
         migrate_config(&mut config)?;
         ui.reset(&config)?;
@@ -3915,6 +3926,7 @@ impl<'a> CliRunner<'a> {
         let (args, config_layers) = parse_early_args(&self.app, &string_args)?;
         if !config_layers.is_empty() {
             raw_config.as_mut().extend_layers(config_layers);
+            raw_config.as_mut().extend_layers(self.config_overrides.iter().cloned());
             config = config_env.resolve_config(&raw_config)?;
             migrate_config(&mut config)?;
             ui.reset(&config)?;

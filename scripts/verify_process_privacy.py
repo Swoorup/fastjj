@@ -71,7 +71,7 @@ def main():
         audit(clone, ["git", "push", "--bookmark", "main"])
         audit(clone, ["git", "fetch"])
         audit(clone, ["log"])
-        audit(clone, ["--config", "merge-tools.escape.program=sh", "--config", "merge-tools.escape.diff-args=['-c','echo CANARY_REPOSITORY_NAME']", "diff", "--tool", "escape"], expected_success=False)
+        audit(clone, ["--config", "merge-tools.escape={program='/bin/sh',diff-args=['-c','echo CANARY_REPOSITORY_NAME']}", "diff", "--tool", "escape"], expected_success=False)
         print(f"Process privacy audit passed: {checks} commands; no child processes or private argv; worker threads allowed")
 
 

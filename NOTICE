@@ -3,6 +3,7 @@ Upstream: https://github.com/jj-vcs/jj/tree/v0.29.0
 
 The vendored CLI is copied from the checksum-verified crates.io jj-cli 0.29.0
 package. It retains upstream copyright and license notices. fastjj adds an
-in-memory argument API and a native text-editor callback, and removes standalone binary/test declarations from
+in-memory argument and configuration APIs and a native text-editor callback,
+and removes standalone binary/test declarations from
 the vendored manifest. The jj repository data model and storage code are
 provided by the unmodified, version-pinned jj-lib dependency.

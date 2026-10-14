@@ -39,6 +39,7 @@ fn run() -> Result<ExitCode, Box<dyn std::error::Error>> {
         .about("A process-private Jujutsu client. Use --request-stdin for private JSON arguments; fastjj privacy explains the enforced policy.")
         .version(concat!(env!("CARGO_PKG_VERSION"), " (jj 0.29.0)"))
         .with_args(request::jj_args(args))
+        .with_config_overrides(request::PRIVACY_CONFIG)
         .add_dispatch_hook(|ui, command, dispatch| {
             let external = match command.matches().subcommand() {
                 Some(("util", m)) => matches!(m.subcommand_name(), Some("exec" | "gc")),
