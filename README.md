@@ -177,6 +177,11 @@ tests use Python 3.11 or newer:
 python3 -m unittest discover -s tests -p 'test_*.py'
 ```
 
+CI and release builds also run `scripts/verify_https_clone.py` against a small
+public GitHub repository to verify native HTTPS and each OS's default certificate
+trust. It requires network access; the Rust integration tests run locally without
+network services.
+
 ## Upstream and license
 
 Apache-2.0. The CLI fork is in `vendor/jj-cli`, with upstream notices retained.

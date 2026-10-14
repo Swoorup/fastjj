@@ -52,6 +52,8 @@ jobs:
           test "$host" = "$TARGET"
       - name: Test optimized binary and kernel privacy
         run: cargo test --release --locked --target "$TARGET"
+      - name: Verify native HTTPS transport and certificate trust
+        run: python3 scripts/verify_https_clone.py "target/$TARGET/release/fastjj"
       - if: runner.os == 'Linux'
         run: sudo apt-get update && sudo apt-get install -y strace
       - if: runner.os == 'Linux'
