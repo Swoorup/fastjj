@@ -67,42 +67,66 @@ fn built_in_editor_updates_description_without_an_external_editor() {
     eprintln!("terminal fixture: editor started");
     drop(command);
     drop(slave);
-    master
-        .write_all("native editor 世界\n.save\n".as_bytes())
-        .unwrap();
-    let deadline = Instant::now() + Duration::from_secs(10);
-    loop {
-        if let Some(status) = child.try_wait().unwrap() {
-            assert!(status.success(), "native editor failed: {status}");
-            break;
-        }
-        if Instant::now() >= deadline {
-            child.kill().unwrap();
-            let _ = child.wait();
-            panic!("native editor did not complete");
-        }
-        std::thread::sleep(Duration::from_millis(10));
-    }
-    let mut terminal_output = Vec::new();
-    eprintln!("terminal fixture: editor exited; drain terminal output");
-    // A macOS PTY master can remain readable without reporting EOF after its
-    // slave closes. The child has exited; drain available bytes, never wait
-    // indefinitely for the device to emit EOF.
+    // Pump both directions concurrently: a macOS PTY can fill its output/echo
+    // buffer and block a synchronous write while the child is still running.
     let flags = unsafe { libc::fcntl(master.as_raw_fd(), libc::F_GETFL) };
     assert_ne!(flags, -1);
     assert_eq!(
         unsafe { libc::fcntl(master.as_raw_fd(), libc::F_SETFL, flags | libc::O_NONBLOCK) },
         0
     );
+    let input = "native editor 世界\n.save\n".as_bytes();
+    let mut sent = 0;
+    let mut terminal_output = Vec::new();
     let mut buffer = [0; 4096];
+    let mut exit_status: Option<std::process::ExitStatus> = None;
+    let deadline = Instant::now() + Duration::from_secs(10);
     loop {
-        match master.read(&mut buffer) {
-            Ok(0) => break,
-            Ok(n) => terminal_output.extend_from_slice(&buffer[..n]),
-            Err(e) if e.raw_os_error() == Some(libc::EIO) => break,
-            Err(e) if e.kind() == io::ErrorKind::WouldBlock => break,
-            Err(e) => panic!("reading terminal failed: {e}"),
+        loop {
+            match master.read(&mut buffer) {
+                Ok(0) => break,
+                Ok(n) => terminal_output.extend_from_slice(&buffer[..n]),
+                Err(e)
+                    if e.raw_os_error() == Some(libc::EIO)
+                        || e.kind() == io::ErrorKind::WouldBlock =>
+                {
+                    break;
+                }
+                Err(e) if e.kind() == io::ErrorKind::Interrupted => continue,
+                Err(e) => panic!("reading terminal failed: {e}"),
+            }
         }
+        if let Some(status) = exit_status {
+            assert!(
+                status.success(),
+                "native editor failed: {status}\n{}",
+                String::from_utf8_lossy(&terminal_output)
+            );
+            break;
+        }
+        if sent < input.len()
+            && String::from_utf8_lossy(&terminal_output).contains("Enter replacement text")
+        {
+            match master.write(&input[sent..]) {
+                Ok(n) => sent += n,
+                Err(e)
+                    if matches!(
+                        e.kind(),
+                        io::ErrorKind::WouldBlock | io::ErrorKind::Interrupted
+                    ) => {}
+                Err(e) => panic!("writing terminal failed: {e}"),
+            }
+        }
+        exit_status = child.try_wait().unwrap();
+        if exit_status.is_none() && Instant::now() >= deadline {
+            child.kill().unwrap();
+            let _ = child.wait();
+            panic!(
+                "native editor did not complete\n{}",
+                String::from_utf8_lossy(&terminal_output)
+            );
+        }
+        std::thread::sleep(Duration::from_millis(10));
     }
     assert!(String::from_utf8_lossy(&terminal_output).contains("Enter replacement text"));
     eprintln!("terminal fixture: verify persisted description");
