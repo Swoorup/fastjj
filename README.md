@@ -9,9 +9,10 @@ transport. It works with jj's repository format and keeps jj's commands, revsets
 templates, automatic working-copy snapshots, operation history, bookmarks,
 rebasing, and conflict handling. It does not launch an installed `jj` or `git`.
 
-**Supported platform:** Linux x86_64 and aarch64 with seccomp filtering and thread
-synchronization. Other platforms, or kernels that cannot install the policy, are
-rejected before loading repository configuration. There is no privacy opt-out.
+**Supported platforms:** Linux and macOS, on Intel/x86_64 and ARM64/Apple Silicon.
+Linux uses synchronized seccomp filters; macOS uses a process-wide Seatbelt
+profile denying fork and exec. Platforms that cannot install their kernel policy
+are rejected before loading repository configuration. There is no privacy opt-out.
 
 ## Build and install
 
@@ -26,8 +27,45 @@ cargo install --path . --locked
 fastjj privacy
 ```
 
-The built executable is `target/release/fastjj`. Installation is from this source
+On macOS, install Xcode Command Line Tools with `xcode-select --install` and
+pkg-config with `brew install pkg-config`, then run the same Cargo commands.
+The built executable is `target/release/fastjj`. Source installation is from this
 checkout; no crates.io release is published. TLS verification remains enabled.
+
+## Release binaries
+
+The [Release binaries workflow](https://github.com/Swoorup/fastjj/actions/workflows/release.yml)
+builds and tests optimized binaries on native runners for:
+
+| OS | Architecture | Target |
+| --- | --- | --- |
+| Linux | x86_64 | `x86_64-unknown-linux-gnu` |
+| Linux | ARM64 | `aarch64-unknown-linux-gnu` |
+| macOS | Intel | `x86_64-apple-darwin` |
+| macOS | Apple Silicon | `aarch64-apple-darwin` |
+
+Every push to `main` and manual workflow run uploads downloadable build artifacts.
+Version tags such as `v0.1.0` additionally publish all four archives to
+[GitHub Releases](https://github.com/Swoorup/fastjj/releases), after every target
+passes its optimized tests. The tag must match the version in `Cargo.toml`.
+Re-running a tag build replaces that release's assets. No tag is created by the
+workflow itself.
+
+Each `.tar.gz` includes the executable, documentation, license, and
+`build-info.json` recording the exact source commit. An adjacent `.sha256` file
+provides its checksum. After extracting an archive, install its `fastjj` executable
+in a directory on your PATH and run `fastjj privacy`.
+
+```sh
+# Linux
+sha256sum --check fastjj-v0.1.0-x86_64-unknown-linux-gnu.tar.gz.sha256
+# macOS (choose the matching architecture's archive)
+shasum -a 256 --check fastjj-v0.1.0-aarch64-apple-darwin.tar.gz.sha256
+```
+
+Linux binaries are built on Ubuntu 24.04 and need a compatible glibc installation.
+macOS binaries use a macOS 13.0 deployment target and are tested on macOS 15.
+They are not Developer ID signed or notarized.
 
 ## Use jj commands
 
@@ -124,13 +162,20 @@ cargo test --locked
 python3 scripts/verify_process_privacy.py target/debug/fastjj
 ```
 
-The last check requires `strace`. It traces real init, snapshot, diff, history,
+The last check is Linux-only and requires `strace`. It traces real init, snapshot, diff, history,
 clone, fetch, push, and forbidden-editor requests and checks for child processes
 and private argv. Rust tests exercise kernel enforcement, inherited restrictions
 on existing and new threads, the x32 ABI, stdin argv, configuration overrides,
 history edits, and native Git transport. The ignored `guard_probe` fixture is
 actually executed in isolation by the `kernel_guard` test so its irreversible
-policy does not restrict the test runner. CI runs on x86_64 and aarch64 Linux.
+policy does not restrict the test runner. On macOS the kernel tests verify direct
+fork, exec, and posix_spawn denials and worker inheritance; argv observation uses
+the platform's `ps`. CI runs on x86_64 and ARM64 Linux and macOS. Release packaging
+tests use Python 3.11 or newer:
+
+```sh
+python3 -m unittest discover -s tests -p 'test_*.py'
+```
 
 ## Upstream and license
 

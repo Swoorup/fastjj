@@ -1,4 +1,4 @@
-//! A fail-closed, inherited Linux seccomp policy. Install before initializing jj.
+//! Mandatory Linux seccomp / macOS Seatbelt policy. Install before initializing jj.
 //!
 //! Denying process creation as well as exec means even a dependency cannot start
 //! a child with sensitive argv. pthread/Rayon/Tokio workers remain available.
@@ -15,6 +15,7 @@ mod linux {
 
     const LD_ABS: u16 = 0x20;
     const JEQ: u16 = 0x15;
+    #[cfg(any(target_arch = "x86_64", test))]
     const JGE: u16 = 0x35;
     const JSET: u16 = 0x45;
     const RET: u16 = 0x06;
@@ -176,6 +177,70 @@ mod linux {
     }
 }
 
+#[cfg(all(
+    target_os = "macos",
+    any(target_arch = "x86_64", target_arch = "aarch64")
+))]
+mod macos {
+    use super::io;
+    use std::ffi::CStr;
+
+    // Seatbelt applies to the whole process, so existing and future pthreads
+    // share the restrictions. Network and filesystem operations remain native.
+    // Both rules matter: denying exec alone would still allow a forked child.
+    const PROFILE: &CStr = c"(version 1) (allow default) (deny process-fork) (deny process-exec)";
+
+    #[link(name = "sandbox")]
+    unsafe extern "C" {
+        fn sandbox_init(
+            profile: *const libc::c_char,
+            flags: u64,
+            errorbuf: *mut *mut libc::c_char,
+        ) -> libc::c_int;
+        fn sandbox_free_error(errorbuf: *mut libc::c_char);
+    }
+
+    pub fn install() -> io::Result<()> {
+        let mut errorbuf = std::ptr::null_mut();
+        // SAFETY: PROFILE is static NUL-terminated storage. The API initializes
+        // errorbuf, whose ownership is returned to sandbox_free_error exactly
+        // once. Flags=0 selects an inline SBPL profile instead of a named one.
+        // This CLI API is deprecated by Apple but remains provided by macOS.
+        // Failure, including nesting in an incompatible sandbox, is fatal;
+        // there is no fallback to an unprotected process.
+        unsafe {
+            let result = sandbox_init(PROFILE.as_ptr(), 0, &mut errorbuf);
+            let error = if result != 0 {
+                Some(if errorbuf.is_null() {
+                    io::Error::last_os_error().to_string()
+                } else {
+                    CStr::from_ptr(errorbuf).to_string_lossy().into_owned()
+                })
+            } else {
+                None
+            };
+            if !errorbuf.is_null() {
+                sandbox_free_error(errorbuf);
+            }
+            match error {
+                Some(message) => Err(io::Error::other(format!(
+                    "macOS process sandbox: {message}"
+                ))),
+                None => Ok(()),
+            }
+        }
+    }
+}
+
+/// Name of the kernel policy for diagnostics, independent of repository data.
+pub fn enforcement_name() -> &'static str {
+    if cfg!(target_os = "macos") {
+        "macOS Seatbelt"
+    } else {
+        "Linux seccomp"
+    }
+}
+
 /// Install the mandatory policy, or refuse to run. There is no opt-out.
 pub fn install() -> io::Result<()> {
     #[cfg(all(
@@ -184,12 +249,18 @@ pub fn install() -> io::Result<()> {
     ))]
     return linux::install();
 
+    #[cfg(all(
+        target_os = "macos",
+        any(target_arch = "x86_64", target_arch = "aarch64")
+    ))]
+    return macos::install();
+
     #[cfg(not(all(
-        target_os = "linux",
+        any(target_os = "linux", target_os = "macos"),
         any(target_arch = "x86_64", target_arch = "aarch64")
     )))]
     Err(io::Error::new(
         io::ErrorKind::Unsupported,
-        "process privacy requires Linux x86_64 or aarch64 with seccomp",
+        "process privacy requires Linux or macOS on x86_64 or aarch64",
     ))
 }
