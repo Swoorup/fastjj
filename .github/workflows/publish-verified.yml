@@ -1,0 +1,81 @@
+name: Publish verified binaries
+on:
+  workflow_dispatch:
+    inputs:
+      run-id:
+        description: Successful Release binaries run matching nix/binary-release.json
+        required: true
+        type: string
+
+permissions:
+  contents: write
+  actions: read
+
+concurrency:
+  group: publish-verified-binaries
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    env:
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      GH_REPO: ${{ github.repository }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Verify build provenance
+        env:
+          RUN_ID: ${{ inputs.run-id }}
+        run: |
+          [[ "$RUN_ID" =~ ^[0-9]+$ ]]
+          gh api "repos/$GH_REPO/actions/runs/$RUN_ID" > /tmp/release-run.json
+          python3 - <<'PY'
+          import json, os
+          from pathlib import Path
+          run = json.loads(Path('/tmp/release-run.json').read_text())
+          release = json.loads(Path('nix/binary-release.json').read_text())
+          assert run['conclusion'] == 'success', 'Build must have passed all release tests'
+          assert run['path'] == '.github/workflows/release.yml', 'Unexpected build workflow'
+          assert run['head_sha'] == release['sourceCommit'], 'Wrong source commit'
+          with open(os.environ['GITHUB_ENV'], 'a') as env:
+              env.write(f"RELEASE_TAG=v{release['version']}\nSOURCE_COMMIT={release['sourceCommit']}\n")
+          PY
+      - uses: actions/download-artifact@v4
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          run-id: ${{ inputs.run-id }}
+          pattern: fastjj-*
+          merge-multiple: true
+          path: dist
+      - name: Verify every archive against the Nix manifest
+        run: |
+          python3 - <<'PY'
+          import base64, hashlib, json, tarfile
+          from pathlib import Path
+          release = json.loads(Path('nix/binary-release.json').read_text())
+          for platform in release['platforms'].values():
+              name = f"fastjj-v{release['version']}-{platform['target']}"
+              archive = Path('dist') / f'{name}.tar.gz'
+              digest = hashlib.sha256(archive.read_bytes()).digest()
+              assert 'sha256-' + base64.b64encode(digest).decode() == platform['hash'], archive
+              assert archive.with_suffix('.gz.sha256').read_text().split() == [digest.hex(), archive.name]
+              with tarfile.open(archive) as tar:
+                  info = json.load(tar.extractfile(f'{name}/build-info.json'))
+              assert info == dict(name='fastjj', version=release['version'],
+                                  target=platform['target'], source_commit=release['sourceCommit'])
+          assert len(list(Path('dist').iterdir())) == 2 * len(release['platforms']), 'Unexpected assets'
+          PY
+      - name: Publish the verified archives without rebuilding
+        run: |
+          cd dist
+          if gh release view "$RELEASE_TAG" >/dev/null 2>&1; then
+            gh release download "$RELEASE_TAG" --dir published
+            for asset in ./*.tar.gz ./*.sha256; do
+              cmp "$asset" "published/${asset#./}"
+            done
+          else
+            gh release create "$RELEASE_TAG" ./*.tar.gz ./*.sha256 \
+              --target "$SOURCE_COMMIT" --title "fastjj $RELEASE_TAG" \
+              --notes "Verified native binaries from commit $SOURCE_COMMIT. All four targets passed the Release binaries workflow. See the bundled README, privacy documentation, and build-info.json. Assets are pinned by the Nix flake and must not be replaced."
+          fi

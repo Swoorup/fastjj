@@ -32,6 +32,58 @@ pkg-config with `brew install pkg-config`, then run the same Cargo commands.
 The built executable is `target/release/fastjj`. Source installation is from this
 checkout; no crates.io release is published. TLS verification remains enabled.
 
+## Nix
+
+With Nix flakes enabled, run directly from this repository or install into your
+profile:
+
+```sh
+nix run github:Swoorup/fastjj -- --version
+nix run github:Swoorup/fastjj -- status
+nix profile install github:Swoorup/fastjj
+```
+
+The default package downloads a public GitHub release binary with a pinned
+SHA-256 checksum; it does not compile fastjj or Rust dependencies. It supports
+`x86_64-linux`, `aarch64-linux`, `x86_64-darwin`, and `aarch64-darwin`. Nix downloads
+the required packaging tools and runtime libraries as well. Linux executables
+have their interpreter and library paths patched for NixOS. The installed
+`bin/fastjj` is a native executable with no launcher script. macOS requires 13.0
+or later.
+
+To use it from a NixOS, nix-darwin, or Home Manager flake, add the input:
+
+```nix
+inputs.fastjj.url = "github:Swoorup/fastjj";
+```
+
+Pass `inputs` to your modules through `specialArgs` (or `extraSpecialArgs` for
+Home Manager), then add the package to `environment.systemPackages` or
+`home.packages`:
+
+```nix
+{ inputs, pkgs, ... }: {
+  environment.systemPackages = [
+    inputs.fastjj.packages.${pkgs.stdenv.hostPlatform.system}.default
+  ];
+}
+```
+
+Both `packages.<system>.default` and `packages.<system>.fastjj` select the binary
+release recorded in [`nix/binary-release.json`](nix/binary-release.json).
+Following `main` updates the packaging; it selects a newer binary only when that
+manifest is updated. Your consumer flake lock pins the repository revision.
+Maintainers should publish a new version, update all four archive hashes and
+the source commit in the manifest, and run `nix flake check` before pushing.
+The **Publish verified binaries** workflow can publish an existing successful
+**Release binaries** run without rebuilding: it checks the run's source commit,
+all archive hashes, and embedded provenance against the manifest before upload.
+
+For private arguments, run `nix run github:Swoorup/fastjj -- --request-stdin < request.json`
+using the [request format below](#keep-the-clients-own-arguments-private).
+Ordinary command arguments are visible to process observers, including in Nix's
+own command line.
+
 ## Release binaries
 
 The [Release binaries workflow](https://github.com/Swoorup/fastjj/actions/workflows/release.yml)
@@ -48,8 +100,9 @@ Every push to `main` and manual workflow run uploads downloadable build artifact
 Version tags such as `v0.1.0` additionally publish all four archives to
 [GitHub Releases](https://github.com/Swoorup/fastjj/releases), after every target
 passes its optimized tests. The tag must match the version in `Cargo.toml`.
-Re-running a tag build replaces that release's assets. No tag is created by the
-workflow itself.
+Published assets are never overwritten: a repeated tag build must match the
+existing assets, or the publish job fails and a new version is needed. No tag is
+created by the workflow itself.
 
 Each `.tar.gz` includes the executable, documentation, license, and
 `build-info.json` recording the exact source commit. An adjacent `.sha256` file

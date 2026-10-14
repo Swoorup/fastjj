@@ -1,0 +1,22 @@
+{
+  "version": "0.1.0",
+  "sourceCommit": "c64619cc8396587564f5e76f6b9c98478feea204",
+  "platforms": {
+    "aarch64-darwin": {
+      "target": "aarch64-apple-darwin",
+      "hash": "sha256-boD8V6mBUYP5z4e7bD5mdUMUu/3owoJAFWS8u2b87K8="
+    },
+    "aarch64-linux": {
+      "target": "aarch64-unknown-linux-gnu",
+      "hash": "sha256-3AIac3+0qfxqCgdznGaroP1P/BYYxO8cKHGvceaai9E="
+    },
+    "x86_64-darwin": {
+      "target": "x86_64-apple-darwin",
+      "hash": "sha256-jKZpttxk2cQB881MkDj1s2RkkAlHBLa+Y+jHCORFDVI="
+    },
+    "x86_64-linux": {
+      "target": "x86_64-unknown-linux-gnu",
+      "hash": "sha256-boXGW9p1WGQ47MdePSh9T1XrkpIGrIQFjLKDMSdW7hk="
+    }
+  }
+}

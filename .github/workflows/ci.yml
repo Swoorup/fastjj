@@ -42,3 +42,38 @@ jobs:
         run: python3 scripts/verify_ssh.py target/debug/fastjj
       - if: runner.os == 'Linux'
         run: python3 scripts/verify_process_privacy.py target/debug/fastjj
+
+  nix:
+    name: Nix binary (${{ matrix.runner }})
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        runner: [ubuntu-24.04, ubuntu-24.04-arm, macos-15-intel, macos-15]
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - uses: cachix/install-nix-action@v31
+      - name: Check formatting and evaluate every platform
+        run: |
+          nix fmt -- --check flake.nix nix/package.nix
+          nix flake check --all-systems --no-build
+      - name: Download and install the native release binary
+        run: |
+          binary="$(nix build .#fastjj --no-link --print-out-paths --print-build-logs)/bin/fastjj"
+          echo "FASTJJ_BINARY=$binary" >> "$GITHUB_ENV"
+          nix run . -- --version
+          nix run . -- privacy
+      - name: Verify HTTPS with the installed Nix package
+        run: python3 scripts/verify_https_clone.py "$FASTJJ_BINARY"
+      - if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update && sudo apt-get install -y strace openssh-server
+          sudo install -d -m 0755 /run/sshd
+      - name: Verify SSH and privacy with the installed Nix package
+        run: python3 scripts/verify_ssh.py "$FASTJJ_BINARY"
+      - if: runner.os == 'Linux'
+        run: python3 scripts/verify_process_privacy.py "$FASTJJ_BINARY"
