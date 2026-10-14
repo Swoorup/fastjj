@@ -125,9 +125,13 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("binary", type=Path)
     parser.add_argument("--ui-binary", type=Path)
+    parser.add_argument("--lua-prompts", action="store_true")
     args = parser.parse_args()
     binary = args.binary.resolve()
     args_ui = args.ui_binary.resolve() if args.ui_binary else None
+    lua_prompts = args.lua_prompts
+    if lua_prompts and args_ui is None:
+        parser.error("--lua-prompts requires --ui-binary")
     sshd = shutil.which("sshd") or "/usr/sbin/sshd"
     with tempfile.TemporaryDirectory(prefix="fastjj-ssh-") as directory:
         root = Path(directory)
@@ -300,6 +304,11 @@ Host *
                 else:
                     jj(clone, ["git", "fetch"], interactive=True)
                 assert f"fetch-{index}" in jj(clone, ["log", "-r", "main@origin", "-T", "description"])
+                if lua_prompts and name == "encrypted":
+                    lua_commit = checked(["git", "--git-dir", str(store), "commit-tree", tree, "-p", commit], input="fetch-lua\n", env=commit_environment).stdout.strip()
+                    checked(["git", "--git-dir", str(store), "update-ref", "refs/heads/main", lua_commit])
+                    git_ui(args_ui, binary, environment, root, clone, password, "fetch-lua", lua_fetch=True)
+                    print("Lua jj() SSH credential prompt and result continuation verified", flush=True)
                 print(f"SSH clone/fetch/push verified: {name}{' with native two-hop ProxyJump' if jumps else ''}", flush=True)
 
             # IdentityAgent is selected explicitly; no SSH_AUTH_SOCK is supplied.

@@ -19,6 +19,8 @@ nix run github:Swoorup/fastjj#jjui
 ```
 
 Existing jjui configuration, themes, key bindings, and Lua actions remain usable.
+Lua `jj(...)` actions yield while the backend runs, so credential panels remain
+responsive and scripts receive the same output/error return values.
 The configuration directory is still jjui's directory; `JJUI_CONFIG_DIR` selects
 an alternative. Repository configuration is supported. The `[askpass] enabled`
 setting controls native background credential prompts; it does not run askpass.
@@ -86,11 +88,11 @@ Build fastjj first, then install Go 1.27.2 or newer and build the UI beside it:
 ```sh
 cargo build --release --locked
 (cd vendor/jjui && CGO_ENABLED=0 go build -trimpath \
-  -ldflags '-s -w -X main.Version=fastjjui-0.2.0-jjui-0.10.11' \
+  -ldflags '-s -w -X main.Version=fastjjui-0.2.1-jjui-0.10.11' \
   -o ../../target/release/fastjjui ./cmd/jjui)
 (cd vendor/jjui && go test ./...)
 python3 scripts/verify_jjui.py target/release/fastjj target/release/fastjjui
-python3 scripts/verify_ssh.py target/release/fastjj --ui-binary target/release/fastjjui
+python3 scripts/verify_ssh.py target/release/fastjj --ui-binary target/release/fastjjui --lua-prompts
 ```
 
 CI runs these checks on all four native platforms. The real-terminal tests cover

@@ -39,6 +39,12 @@ type Runner struct {
 
 var nextActionCompletionID atomic.Uint64
 
+type jjResultMsg struct {
+	id     uint64
+	output string
+	err    error
+}
+
 func RunScript(ctx *uicontext.MainContext, src string) (*Runner, tea.Cmd, error) {
 	L, err := vmFromContext(ctx)
 	if err != nil {
@@ -289,6 +295,30 @@ func registerAPI(L *lua.LState, ctx *uicontext.MainContext) {
 	})
 	jjFn := L.NewFunction(func(L *lua.LState) int {
 		args := argsFromLua(L)
+		if ctx.ScriptVM != nil && L != ctx.ScriptVM {
+			// Preserve Lua's synchronous return values while yielding the UI loop.
+			// A credential prompt needs that loop to render and accept input.
+			id := nextActionCompletionID.Add(1)
+			return yieldStep(L, step{
+				cmd: func() tea.Msg {
+					out, err := ctx.RunCommandImmediate(args)
+					return jjResultMsg{id: id, output: string(out), err: err}
+				},
+				matcher: func(msg tea.Msg) (bool, []lua.LValue) {
+					result, ok := msg.(jjResultMsg)
+					if !ok || result.id != id {
+						return false, nil
+					}
+					if result.err != nil {
+						return true, []lua.LValue{lua.LNil, lua.LString(result.err.Error())}
+					}
+					return true, []lua.LValue{lua.LString(result.output), lua.LNil}
+				},
+			})
+		}
+		// Configuration setup runs before the event loop and has no UI prompt
+		// handler. Keep its existing immediate semantics and fail closed if a
+		// command requires credentials before the UI is available.
 		out, err := ctx.RunCommandImmediate(args)
 		if err != nil {
 			L.Push(lua.LNil)

@@ -115,7 +115,7 @@ builds and tests optimized binaries on native runners for:
 | macOS | Apple Silicon | `aarch64-apple-darwin` |
 
 Every push to `main` and manual workflow run uploads downloadable build artifacts.
-Version tags such as `v0.2.0` additionally publish all four archives to
+Version tags such as `v0.2.1` additionally publish all four archives to
 [GitHub Releases](https://github.com/Swoorup/fastjj/releases), after every target
 passes its optimized tests. The tag must match the version in `Cargo.toml`.
 Published assets are never overwritten: a repeated tag build must match the
@@ -129,9 +129,9 @@ in the same directory on your PATH and run `fastjj privacy`.
 
 ```sh
 # Linux
-sha256sum --check fastjj-v0.2.0-x86_64-unknown-linux-gnu.tar.gz.sha256
+sha256sum --check fastjj-v0.2.1-x86_64-unknown-linux-gnu.tar.gz.sha256
 # macOS (choose the matching architecture's archive)
-shasum -a 256 --check fastjj-v0.2.0-aarch64-apple-darwin.tar.gz.sha256
+shasum -a 256 --check fastjj-v0.2.1-aarch64-apple-darwin.tar.gz.sha256
 ```
 
 Linux binaries are built on Ubuntu 24.04 and need a compatible glibc installation.

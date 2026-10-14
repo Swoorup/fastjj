@@ -1,6 +1,7 @@
 package scripting
 
 import (
+	"fmt"
 	"testing"
 
 	lua "github.com/yuin/gopher-lua"
@@ -481,5 +482,43 @@ func TestRunner_WaitRefreshResumesOnUpdateRevisions(t *testing.T) {
 			assert.True(t, runner.Done())
 			assert.Equal(t, "true", ctx.ScriptVM.GetGlobal("done").String())
 		})
+	}
+}
+
+type immediateCommandStub struct {
+	uicontext.CommandRunner
+	called bool
+	err    error
+}
+
+func (s *immediateCommandStub) RunCommandImmediate(args []string) ([]byte, error) {
+	s.called = true
+	return []byte("private result"), s.err
+}
+
+func TestLuaJJYieldsEventLoopAndPreservesReturnValues(t *testing.T) {
+	for _, commandError := range []error{nil, fmt.Errorf("authentication cancelled")} {
+		ctx := setupVM(t)
+		stub := &immediateCommandStub{err: commandError}
+		ctx.CommandRunner = stub
+		runner, cmd, err := RunScript(ctx, `out, err = jj({"git", "fetch"}); finished = true`)
+		require.NoError(t, err)
+		require.False(t, stub.called, "backend must execute outside the UI event loop")
+		require.False(t, runner.Done())
+		require.NotNil(t, cmd)
+		result := cmd().(jjResultMsg)
+		require.True(t, stub.called)
+		require.Nil(t, runner.HandleMsg(jjResultMsg{id: result.id + 1}))
+		require.False(t, runner.Done(), "another command must not resume this script")
+		runner.HandleMsg(result)
+		require.True(t, runner.Done())
+		require.Equal(t, lua.LTrue, ctx.ScriptVM.GetGlobal("finished"))
+		if commandError == nil {
+			require.Equal(t, lua.LString("private result"), ctx.ScriptVM.GetGlobal("out"))
+			require.Equal(t, lua.LNil, ctx.ScriptVM.GetGlobal("err"))
+		} else {
+			require.Equal(t, lua.LNil, ctx.ScriptVM.GetGlobal("out"))
+			require.Equal(t, lua.LString(commandError.Error()), ctx.ScriptVM.GetGlobal("err"))
+		}
 	}
 }

@@ -103,17 +103,22 @@ def jj(binary, env, cwd, args):
     return result.stdout.decode()
 
 
-def git_ui(ui_binary, backend, environment, root, cwd, password, expected, cancel=False, action="f", check=None):
+def git_ui(ui_binary, backend, environment, root, cwd, password, expected, cancel=False, action="f", check=None, lua_fetch=False):
     """Used by the disposable SSH fixture to test real background credential UI."""
     config = root / "jjui-config"
     config.mkdir(exist_ok=True)
+    if lua_fetch:
+        (config / "config.lua").write_text('function setup(config)\n  config.action("private-fetch", function()\n    local output, err = jj({"git", "fetch"})\n    assert(err == nil, err)\n    assert(output ~= nil)\n    flash("LUA_FETCH_DONE")\n  end, { key = "ctrl+g", scope = "revisions", desc = "private fetch" })\nend\n')
     environment = dict(environment, JJUI_CONFIG_DIR=str(config))
     ui = UI(ui_binary, cwd, environment, root)
     try:
         ui.wait(lambda text: "revisions" in text, "initial revisions")
-        ui.send("g")
-        ui.send(action)
-        ui.send("\r")
+        if lua_fetch:
+            ui.send("\x07")
+        else:
+            ui.send("g")
+            ui.send(action)
+            ui.send("\r")
         ui.wait(lambda text: "Passphrase for SSH key" in text, "native credential panel")
         if cancel:
             ui.send("\x1b")
@@ -121,6 +126,8 @@ def git_ui(ui_binary, backend, environment, root, cwd, password, expected, cance
         else:
             ui.send(password + "\r")
             ui.wait(lambda text: check() if check else expected in jj(backend,environment,cwd,["log","--no-graph","-r","main@origin","-T","description"]), "SSH fetch result")
+        if lua_fetch:
+            ui.wait(lambda text: "LUA_FETCH_DONE" in text, "Lua command result and continuation")
         assert password not in ui.text(), "credential echoed in UI"
     finally:
         ui.close()

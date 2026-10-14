@@ -1,6 +1,6 @@
 [package]
 name = "fastjj"
-version = "0.2.0"
+version = "0.2.1"
 edition = "2024"
 rust-version = "1.89"
 description = "A process-private Jujutsu client with in-process Git transport"
