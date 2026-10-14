@@ -221,6 +221,48 @@ fn config_cannot_enable_subprocess_transport_or_pagers() {
 }
 
 #[test]
+fn user_config_is_preserved_before_and_after_subcommands() {
+    let f = Fixture::new();
+    let repo = f.init("user-options");
+    for args in [
+        vec![
+            "--config",
+            "user.name='Override'",
+            "config",
+            "get",
+            "user.name",
+        ],
+        vec![
+            "config",
+            "get",
+            "user.name",
+            "--config",
+            "user.name='Override'",
+        ],
+    ] {
+        let output = f.output(&repo, &args);
+        assert!(output.status.success(), "{}", text(&output));
+        assert_eq!(String::from_utf8_lossy(&output.stdout).trim(), "Override");
+    }
+    // The same preservation applies to in-memory private requests.
+    let output = f.private(
+        &repo,
+        &[
+            "--config",
+            "user.name='Private Override'",
+            "config",
+            "get",
+            "user.name",
+        ],
+    );
+    assert!(output.status.success(), "{}", text(&output));
+    assert_eq!(
+        String::from_utf8_lossy(&output.stdout).trim(),
+        "Private Override"
+    );
+}
+
+#[test]
 fn external_commands_and_editors_fail_without_side_effects() {
     let f = Fixture::new();
     let repo = f.init("external-test");
@@ -231,19 +273,26 @@ fn external_commands_and_editors_fail_without_side_effects() {
     assert!(text(&output).contains("fastjj denies"));
     assert!(!marker.exists());
     fs::write(repo.join("file.txt"), "change\n").unwrap();
-    let editor = format!("merge-tools.escape.diff-args=['-c','{script}']");
-    let output = f.output(
+    // Deserialize one complete tool table. Separate leaf config layers can
+    // shadow fields during typed table lookup. Use an absolute, existing shell
+    // so the failure proves sandbox enforcement rather than PATH lookup.
+    let editor = format!("merge-tools.escape={{program='/bin/sh',diff-args=['-c','{script}']}}");
+    let configured = f.output(
         &repo,
         &[
             "--config",
-            "merge-tools.escape.program=sh",
-            "--config",
             &editor,
-            "diff",
-            "--tool",
-            "escape",
+            "config",
+            "get",
+            "merge-tools.escape.program",
         ],
     );
+    assert!(configured.status.success(), "{}", text(&configured));
+    assert_eq!(
+        String::from_utf8_lossy(&configured.stdout).trim(),
+        "/bin/sh"
+    );
+    let output = f.output(&repo, &["--config", &editor, "diff", "--tool", "escape"]);
     assert!(!output.status.success());
     let error = text(&output);
     assert!(

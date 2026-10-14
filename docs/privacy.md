@@ -90,8 +90,8 @@ silent unprotected mode.
 
 ## Maintaining the boundary
 
-The command-line safety settings are usability defaults, not the security
-boundary. Kernel enforcement remains effective even if user configuration or a
+The client's configuration overrides select native implementations; the security
+boundary is the kernel policy. Enforcement remains effective even if user configuration or a
 dependency tries to start a program. The pinned native Git backend is needed for
 network commands to work while that boundary is enforced.
 

@@ -45,26 +45,25 @@ pub fn read(reader: impl Read) -> io::Result<Request> {
     Ok(request)
 }
 
-/// Apply privacy defaults after user options, before any `--` delimiter.
-/// The kernel policy is the security boundary; these settings select useful
-/// in-process implementations instead of triggering denied subprocess calls.
+/// Useful in-process implementations; the kernel policy remains the boundary.
+pub const PRIVACY_CONFIG: &str = r#"
+[git]
+subprocess = false
+[ui]
+pager = ":builtin"
+editor = ":builtin"
+diff-editor = ":builtin"
+merge-editor = ":builtin"
+[core]
+fsmonitor = "none"
+[debug]
+suppress-git2-deprecation-warning = true
+"#;
+
+/// Hand argv to jj verbatim, adding only its in-memory application name.
 pub fn jj_args(args: Vec<OsString>) -> Vec<OsString> {
     let mut result = vec![OsString::from("fastjj")];
-    let split = args.iter().position(|a| a == "--").unwrap_or(args.len());
-    result.extend_from_slice(&args[..split]);
-    result.extend(
-        [
-            "--config=git.subprocess=false",
-            "--config=ui.pager=\":builtin\"",
-            "--config=ui.editor=\":builtin\"",
-            "--config=ui.diff-editor=\":builtin\"",
-            "--config=ui.merge-editor=\":builtin\"",
-            "--config=core.fsmonitor=\"none\"",
-            "--config=debug.suppress-git2-deprecation-warning=true",
-        ]
-        .map(OsString::from),
-    );
-    result.extend_from_slice(&args[split..]);
+    result.extend(args);
     result
 }
 
@@ -97,21 +96,5 @@ mod tests {
                 .to_string()
                 .contains("1 MiB")
         );
-    }
-
-    #[test]
-    fn inserts_options_before_path_delimiter() {
-        let args = jj_args(
-            ["diff", "--", "--config=git.subprocess=true"]
-                .map(OsString::from)
-                .to_vec(),
-        );
-        let delimiter = args.iter().position(|s| s == "--").unwrap();
-        assert!(
-            args[..delimiter]
-                .iter()
-                .any(|s| s == "--config=git.subprocess=false")
-        );
-        assert_eq!(args[delimiter + 1], "--config=git.subprocess=true");
     }
 }
