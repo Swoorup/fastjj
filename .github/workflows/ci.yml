@@ -35,6 +35,10 @@ jobs:
         run: python3 scripts/verify_https_clone.py target/debug/fastjj
       - run: python3 -m unittest discover -s tests -p 'test_*.py'
       - if: runner.os == 'Linux'
-        run: sudo apt-get update && sudo apt-get install -y strace
+        run: |
+          sudo apt-get update && sudo apt-get install -y strace openssh-server
+          sudo install -d -m 0755 /run/sshd
+      - name: Verify native SSH authentication, configuration, tunnels, and privacy
+        run: python3 scripts/verify_ssh.py target/debug/fastjj
       - if: runner.os == 'Linux'
         run: python3 scripts/verify_process_privacy.py target/debug/fastjj

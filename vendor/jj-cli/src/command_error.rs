@@ -623,8 +623,8 @@ jj currently does not support partial clones. To use jj with this repository, tr
                  successfully load certificates. Try setting it to the path of a directory that \
                  contains a `.ssh` directory."
             } else {
-                "Jujutsu uses libssh2, which doesn't respect ~/.ssh/config. Does `ssh -F \
-                 /dev/null` to the host work?"
+                "fastjj uses native SSH. Check IdentityFile, IdentityAgent, User, Port, and \
+                 known_hosts in your SSH configuration. External SSH commands cannot run."
             };
 
             user_error_with_hint(err, hint)

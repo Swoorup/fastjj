@@ -133,12 +133,61 @@ In scripts without a controlling terminal, pass `-m` instead.
 
 ## Git and external tools
 
-Clone, fetch, push, local repositories, HTTP(S), and SSH use libgit2/libssh2 in the
-same process. SSH agent authentication uses the existing agent socket, and SSH
-keys and terminal HTTPS prompts use the embedded jj backend. Git credential
-helpers and pinentry cannot execute; use in-process authentication or an existing
-SSH agent. In-process SSH does not execute `ssh`, `ProxyCommand`, or SSH wrappers.
-Authentication and transport options differ from a subprocess-based Git client.
+Clone, fetch, push, local repositories, HTTP(S), and SSH run in the same process.
+The native SSH smart transport connects libgit2 to libssh2 without invoking
+`git`, `ssh`, a shell, credential helpers, or pinentry. It reads SSH configuration
+from `~/.ssh/config` and `/etc/ssh/ssh_config`, with user settings taking priority.
+
+SSH supports host aliases and patterns, `HostName`, `User`, `Port`, ordered
+`IdentityFile` entries, `IdentitiesOnly`, `IdentityAgent` (including `none`),
+`Include`, and native `Match host`, `originalhost`, `user`, and `localuser`.
+Paths support quoting, `~/`, and `%d`, `%h`, `%n`, `%r`, `%p`, and `%%` tokens.
+Algorithm lists (including `+`, `-`, and `^` modifiers) for `KexAlgorithms`,
+`HostKeyAlgorithms`, `Ciphers`, and
+`MACs`, compression, `ConnectTimeout`, and `PubkeyAuthentication` are supported.
+`FASTJJ_SSH_CONFIG` can select a separate SSH configuration file; this replaces
+the two default files. Its value is an environment variable, outside argv privacy.
+
+Ed25519, ECDSA, and RSA private keys are read directly. Encrypted keys prompt on
+the controlling terminal with echo disabled, also in `--request-stdin` mode.
+Passphrases are cached only for the current invocation and their buffers are
+cleared on drop. `BatchMode yes` disables terminal prompts. Existing agents can
+provide unlocked keys or hardware-backed identities; fastjj never starts an
+agent. On macOS, `UseKeychain yes` also tries accessible legacy OpenSSH keychain
+entries through the native Security framework. Apple's protected keychain items
+and hardware key operations should be accessed through an existing SSH agent.
+
+`UserKnownHostsFile`, `GlobalKnownHostsFile`, `HostKeyAlias`, hashed host entries,
+and revoked keys are supported. `StrictHostKeyChecking yes` requires a trusted
+key; `ask` (the default) prompts with its SHA256 fingerprint; `accept-new` stores
+previously unknown keys. Changed or revoked keys always fail. Host verification
+cannot be disabled. Verify a new GitHub fingerprint against GitHub's published
+host keys before accepting it.
+
+`ProxyJump` supports aliases, explicit users/ports, and multiple hops. Each hop
+authenticates and verifies its host key. SSH forwarding uses bounded buffers and
+worker threads; no proxy subprocess starts. Cyclic configurations fail.
+`ProxyCommand`, `Match exec`, local/remote commands, and `KnownHostsCommand`
+cannot run. SSH certificates are not implemented;
+an explicit request for these returns an error. Other OpenSSH features such as
+connection sharing and background forwarding are outside this Git transport.
+
+For GitHub, this configuration selects a dedicated key:
+
+```ssh-config
+Host github-work
+    HostName github.com
+    User git
+    IdentityFile ~/.ssh/github-work
+    IdentitiesOnly yes
+```
+
+Register the corresponding public key with GitHub and configure a remote such as
+`github-work:OWNER/REPO.git`. Use a private stdin request when setting that URL.
+Then run `fastjj git fetch` or `fastjj git push` inside the repository. For SSH
+over port 443, use `HostName ssh.github.com` and `Port 443` with its verified host
+key. Git credential helpers for HTTPS still cannot execute; use native terminal
+credentials instead.
 
 Commands whose purpose is running other programs (`util exec`, `fix`, `util gc`,
 and `config edit`) return an explicit privacy error. External text editors,
@@ -175,6 +224,19 @@ tests use Python 3.11 or newer:
 
 ```sh
 python3 -m unittest discover -s tests -p 'test_*.py'
+```
+
+CI and optimized release builds run `scripts/verify_ssh.py` against disposable
+SSH servers and keys. It performs real clone/fetch/push with custom Ed25519 and
+RSA keys, directly encrypted keys through a PTY, an encrypted agent key with
+`IdentitiesOnly`, aliases and includes, and a two-hop native `ProxyJump`. It also
+checks unknown/changed/revoked host rejection, identity selection, external
+command rejection, and process privacy. Linux traces each client process tree;
+both platforms observe argv and run kernel subprocess-denial tests. Install
+OpenSSH server/client tools and `strace` on Linux to run it locally:
+
+```sh
+python3 scripts/verify_ssh.py target/debug/fastjj
 ```
 
 CI and release builds also run `scripts/verify_https_clone.py` against a small

@@ -9,6 +9,10 @@ fn run() -> Result<ExitCode, Box<dyn std::error::Error>> {
     // Before config loading, jj initialization, or thread creation. Never run
     // jj if the kernel cannot enforce the process-privacy guarantee.
     privacy::install().map_err(|e| format!("cannot enforce process privacy: {e}"))?;
+    // SAFETY: jj and its workers have not been initialized yet.
+    unsafe {
+        fastjj::ssh::install()?;
+    }
     jj_cli::description_util::register_builtin_text_editor(editor::edit);
 
     let mut args: Vec<OsString> = std::env::args_os().skip(1).collect();
