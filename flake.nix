@@ -20,6 +20,7 @@
         in
         {
           inherit fastjj;
+          fastjjui = fastjj;
           default = fastjj;
         }
       );
@@ -32,9 +33,15 @@
             program = "${self.packages.${system}.fastjj}/bin/fastjj";
             meta.description = "A process-private Jujutsu client";
           };
+          jjui = {
+            type = "app";
+            program = "${self.packages.${system}.fastjj}/bin/fastjjui";
+            meta.description = "Jujutsu UI with private command and credential channels";
+          };
         in
         {
-          inherit fastjj;
+          inherit fastjj jjui;
+          fastjjui = jjui;
           default = fastjj;
         }
       );

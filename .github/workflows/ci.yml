@@ -59,6 +59,8 @@ jobs:
 
   nix:
     name: Nix binary (${{ matrix.runner }})
+    # Validate the source before exercising the pinned published binaries.
+    needs: check
     timeout-minutes: 20
     strategy:
       fail-fast: false
@@ -79,8 +81,10 @@ jobs:
         run: |
           binary="$(nix build .#fastjj --no-link --print-out-paths --print-build-logs)/bin/fastjj"
           echo "FASTJJ_BINARY=$binary" >> "$GITHUB_ENV"
+          echo "FASTJJUI_BINARY=$(dirname "$binary")/fastjjui" >> "$GITHUB_ENV"
           nix run . -- --version
           nix run . -- privacy
+          nix run .#jjui -- --version
       - name: Verify HTTPS with the installed Nix package
         run: python3 scripts/verify_https_clone.py "$FASTJJ_BINARY"
       - if: runner.os == 'Linux'
@@ -88,6 +92,8 @@ jobs:
           sudo apt-get update && sudo apt-get install -y strace openssh-server
           sudo install -d -m 0755 /run/sshd
       - name: Verify SSH and privacy with the installed Nix package
-        run: python3 scripts/verify_ssh.py "$FASTJJ_BINARY"
+        run: python3 scripts/verify_ssh.py "$FASTJJ_BINARY" --ui-binary "$FASTJJUI_BINARY"
+      - name: Verify real jjui workflows with the installed Nix package
+        run: python3 scripts/verify_jjui.py "$FASTJJ_BINARY" "$FASTJJUI_BINARY"
       - if: runner.os == 'Linux'
         run: python3 scripts/verify_process_privacy.py "$FASTJJ_BINARY"
