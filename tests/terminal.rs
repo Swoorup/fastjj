@@ -32,8 +32,8 @@ fn built_in_editor_updates_description_without_an_external_editor() {
                 &mut master_fd,
                 &mut slave_fd,
                 std::ptr::null_mut(),
-                std::ptr::null(),
-                std::ptr::null(),
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
             )
         },
         0
@@ -50,9 +50,13 @@ fn built_in_editor_updates_description_without_an_external_editor() {
         .stderr(Stdio::from(slave.try_clone().unwrap()));
     // This is the *test runner* setting up the client's controlling terminal
     // before exec. fastjj subsequently installs its own process-denial policy.
+    #[cfg(target_os = "macos")]
+    let tty_request = libc::c_ulong::from(libc::TIOCSCTTY);
+    #[cfg(not(target_os = "macos"))]
+    let tty_request = libc::TIOCSCTTY;
     unsafe {
-        command.pre_exec(|| {
-            if libc::setsid() == -1 || libc::ioctl(0, libc::TIOCSCTTY, 0) == -1 {
+        command.pre_exec(move || {
+            if libc::setsid() == -1 || libc::ioctl(0, tty_request, 0) == -1 {
                 return Err(io::Error::last_os_error());
             }
             Ok(())
