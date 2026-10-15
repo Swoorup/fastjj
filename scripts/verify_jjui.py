@@ -19,8 +19,9 @@ import time
 
 
 class UI:
-    def __init__(self, binary, cwd, environment, root):
+    def __init__(self, binary, cwd, environment, root, backend_name):
         self.trace = root / "jjui-process.trace"
+        self.backend_name = backend_name
         argv = [str(binary)]
         if sys.platform.startswith("linux"):
             assert shutil.which("strace"), "strace is required"
@@ -95,7 +96,8 @@ class UI:
             execs = [line for line in events.splitlines() if re.search(r"\bexecve(?:at)?\(", line)]
             assert len(execs) > 3, "UI did not exercise backend subprocesses"
             for line in execs[1:]:
-                assert '["fastjj", "--request-fd"]' in line or '["fastjj", "--interface-version"]' in line, line
+                expected = [json.dumps([self.backend_name, flag]) for flag in ("--request-fd", "--interface-version")]
+                assert any(argv in line for argv in expected), line
 
 
 def jj(binary, env, cwd, args):
@@ -112,7 +114,7 @@ def git_ui(ui_binary, backend, environment, root, cwd, password, expected, cance
     if lua_fetch:
         (config / "config.lua").write_text('function setup(config)\n  config.action("private-fetch", function()\n    local output, err = jj({"git", "fetch"})\n    assert(err == nil, err)\n    assert(output ~= nil)\n    flash("LUA_FETCH_DONE")\n  end, { key = "ctrl+g", scope = "revisions", desc = "private fetch" })\nend\n')
     environment = dict(environment, JJUI_CONFIG_DIR=str(config))
-    ui = UI(ui_binary, cwd, environment, root)
+    ui = UI(ui_binary, cwd, environment, root, backend.name)
     try:
         ui.wait(lambda text: "revisions" in text, "initial revisions")
         if lua_fetch:
@@ -141,7 +143,7 @@ def main():
     parser.add_argument("ui_binary", type=Path)
     args = parser.parse_args()
     binary, ui_binary = args.binary.resolve(), args.ui_binary.resolve()
-    with tempfile.TemporaryDirectory(prefix="fastjj-ui-") as directory:
+    with tempfile.TemporaryDirectory(prefix="fjj-ui-") as directory:
         root = Path(directory)
         config = root / "config.toml"
         config.write_text("[user]\nname='UI Test'\nemail='ui@example.invalid'\n[git]\ncolocate=false\n[ui]\ncolor='never'\npaginate='never'\n")
@@ -154,7 +156,7 @@ def main():
         jj(binary,env,root,["git","init",str(repo)])
         (repo / "FILE_CANARY").write_text("CONTENT_CANARY\n")
         jj(binary,env,repo,["describe","-m","INITIAL_CANARY"])
-        ui = UI(ui_binary,repo,env,root)
+        ui = UI(ui_binary,repo,env,root,binary.name)
         try:
             ui.wait(lambda text: "INITIAL_CANARY" in text, "revision graph")
             ui.send("p")

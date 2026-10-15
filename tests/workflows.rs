@@ -6,7 +6,7 @@ use std::process::{Command, Output, Stdio};
 use serde_json::json;
 use tempfile::TempDir;
 
-const BIN: &str = env!("CARGO_BIN_EXE_fastjj");
+const BIN: &str = env!("CARGO_BIN_EXE_fjj");
 
 struct Fixture {
     root: TempDir,
@@ -132,7 +132,7 @@ fn private_stdin_init_and_status_keep_argv_clean() {
         .stderr(Stdio::piped())
         .spawn()
         .unwrap();
-    // Observe the running process from the test harness (not from fastjj).
+    // Observe the running process from the test harness (not from fjj).
     // Wide ps output is available on both macOS and Linux and never shows env.
     let observed = Command::new("ps")
         .args(["-ww", "-p", &child.id().to_string(), "-o", "args="])
@@ -377,7 +377,7 @@ fn external_commands_and_editors_fail_without_side_effects() {
     let script = format!("touch {}", marker.display());
     let output = f.output(&repo, &["util", "exec", "--", "sh", "-c", &script]);
     assert!(!output.status.success());
-    assert!(text(&output).contains("fastjj denies"));
+    assert!(text(&output).contains("fjj denies"));
     assert!(!marker.exists());
     fs::write(repo.join("file.txt"), "change\n").unwrap();
     // Deserialize one complete tool table. Separate leaf config layers can
@@ -436,15 +436,19 @@ fn malformed_requests_fail_without_echoing_private_input() {
 }
 
 #[test]
-fn help_version_and_privacy_status() {
+fn help_version_and_embed_status() {
     let f = Fixture::new();
-    assert!(f.run(f.root.path(), &["--help"]).contains("fastjj"));
+    assert!(f.run(f.root.path(), &["--help"]).contains("fjj"));
     assert!(
         f.run(f.root.path(), &["--version"])
             .contains(env!("CARGO_PKG_VERSION"))
     );
     assert!(
-        f.run(f.root.path(), &["privacy"])
+        f.run(f.root.path(), &["embed"])
             .contains("Child processes and exec: denied")
+    );
+    assert_eq!(
+        f.run(f.root.path(), &["embed"]),
+        f.run(f.root.path(), &["privacy"])
     );
 }

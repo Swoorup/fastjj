@@ -25,7 +25,7 @@ func InitVM(ctx *uicontext.MainContext) error {
 	// These Lua standard-library entry points bypass jjui's command runner.
 	// Keep scripting and file IO, but prevent shell argv from leaking paths.
 	denied := L.NewFunction(func(L *lua.LState) int {
-		L.RaiseError("external processes are disabled by fastjjui process privacy")
+		L.RaiseError("external processes are disabled by fjjui process privacy")
 		return 0
 	})
 	for _, entry := range [][2]string{{"os", "execute"}, {"io", "popen"}} {

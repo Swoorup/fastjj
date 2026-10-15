@@ -17,7 +17,7 @@ fn run() -> Result<ExitCode, Box<dyn std::error::Error>> {
 
     let mut args: Vec<OsString> = std::env::args_os().skip(1).collect();
     if args == [OsString::from("--interface-version")] {
-        println!("fastjj-private-v1 jj=0.37.0");
+        println!("fjj-embed-v1 jj=0.37.0");
         return Ok(ExitCode::SUCCESS);
     }
     if args
@@ -48,9 +48,10 @@ fn run() -> Result<ExitCode, Box<dyn std::error::Error>> {
         args = private.args.into_iter().map(OsString::from).collect();
     }
 
-    if args == [OsString::from("privacy")] {
+    // Keep the former diagnostic command as an alias for existing integrations.
+    if args == [OsString::from("embed")] || args == [OsString::from("privacy")] {
         println!(
-            "fastjj {} (jj 0.37.0)\nProcess privacy: enforced by {}\nChild processes and exec: denied\nWorker threads: allowed\nGit transport: in-process libgit2\nPrivate request modes: --request-stdin, --request-fd",
+            "fjj {} (jj 0.37.0)\nEmbedded process policy: enforced by {}\nChild processes and exec: denied\nWorker threads: allowed\nGit transport: in-process libgit2\nRequest modes: --request-stdin, --request-fd",
             env!("CARGO_PKG_VERSION"),
             privacy::enforcement_name()
         );
@@ -62,8 +63,8 @@ fn run() -> Result<ExitCode, Box<dyn std::error::Error>> {
     }
 
     Ok(CliRunner::init()
-        .name("fastjj")
-        .about("A process-private Jujutsu client. Use --request-stdin for private JSON arguments; fastjj privacy explains the enforced policy.")
+        .name("fjj")
+        .about("An embedded Jujutsu client. Use --request-stdin for in-memory JSON arguments; fjj embed explains the enforced process policy.")
         .version(concat!(env!("CARGO_PKG_VERSION"), " (jj 0.37.0)"))
         .with_args(request::jj_args(args))
         .with_config_overrides(request::PRIVACY_CONFIG)
@@ -75,7 +76,7 @@ fn run() -> Result<ExitCode, Box<dyn std::error::Error>> {
                 _ => false,
             };
             if external {
-                return Err(user_error("this command requires external processes, which fastjj denies")
+                return Err(user_error("this command requires external processes, which fjj denies")
                     .hinted("Use config set for configuration. Run external tools separately when needed."));
             }
             dispatch(ui, command)
@@ -87,7 +88,7 @@ fn main() -> ExitCode {
     match run() {
         Ok(code) => code,
         Err(error) => {
-            eprintln!("fastjj: {error}");
+            eprintln!("fjj: {error}");
             ExitCode::FAILURE
         }
     }

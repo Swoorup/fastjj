@@ -45,7 +45,7 @@ jobs:
         with:
           github-token: ${{ secrets.GITHUB_TOKEN }}
           run-id: ${{ inputs.run-id }}
-          pattern: fastjj-*
+          pattern: fjj-*
           merge-multiple: true
           path: dist
       - name: Verify every archive against the Nix manifest
@@ -55,14 +55,14 @@ jobs:
           from pathlib import Path
           release = json.loads(Path('nix/binary-release.json').read_text())
           for platform in release['platforms'].values():
-              name = f"fastjj-v{release['version']}-{platform['target']}"
+              name = f"fjj-v{release['version']}-{platform['target']}"
               archive = Path('dist') / f'{name}.tar.gz'
               digest = hashlib.sha256(archive.read_bytes()).digest()
               assert 'sha256-' + base64.b64encode(digest).decode() == platform['hash'], archive
               assert archive.with_suffix('.gz.sha256').read_text().split() == [digest.hex(), archive.name]
               with tarfile.open(archive) as tar:
                   info = json.load(tar.extractfile(f'{name}/build-info.json'))
-              assert info == dict(name='fastjj', version=release['version'],
+              assert info == dict(name='fjj', version=release['version'],
                                   target=platform['target'], source_commit=release['sourceCommit'])
           assert len(list(Path('dist').iterdir())) == 2 * len(release['platforms']), 'Unexpected assets'
           PY
@@ -90,6 +90,6 @@ jobs:
             fi
           else
             gh release create "$RELEASE_TAG" ./*.tar.gz ./*.sha256 \
-              --verify-tag --title "fastjj $RELEASE_TAG" \
-              --notes "Verified native binaries from commit $SOURCE_COMMIT. All four targets passed the Release binaries workflow. See the bundled README, privacy documentation, and build-info.json. Assets are pinned by the Nix flake and must not be replaced."
+              --verify-tag --title "fjj $RELEASE_TAG" \
+              --notes "Verified native binaries from commit $SOURCE_COMMIT. All four targets passed the Release binaries workflow. See the bundled README, embedded process documentation, and build-info.json. Assets are pinned by the Nix flake and must not be replaced."
           fi

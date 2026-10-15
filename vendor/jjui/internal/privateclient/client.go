@@ -1,4 +1,4 @@
-// Package privateclient is the only backend process boundary in fastjjui.
+// Package privateclient is the only backend process boundary in fjjui.
 // Arguments travel over descriptor 3; optional UI prompts use descriptor 4.
 // stdin/stdout/stderr retain their ordinary jj meaning.
 package privateclient
@@ -41,28 +41,28 @@ func executable() (string, error) {
 		if resolved, err := filepath.EvalSymlinks(ui); err == nil {
 			ui = resolved
 		}
-		sibling := filepath.Join(filepath.Dir(ui), "fastjj")
+		sibling := filepath.Join(filepath.Dir(ui), "fjj")
 		if info, err := os.Stat(sibling); err == nil && !info.IsDir() && info.Mode()&0111 != 0 {
 			return sibling, nil
 		}
 	}
-	if backend, err := exec.LookPath("fastjj"); err == nil {
+	if backend, err := exec.LookPath("fjj"); err == nil {
 		return backend, nil
 	}
-	return "", errors.New("fastjj 0.2 or newer is required; install it beside fastjjui or on PATH")
+	return "", errors.New("fjj 0.2.2 or newer is required; install it beside fjjui or on PATH")
 }
 
-// Probe refuses to fall back to an ordinary jj client or an incompatible fastjj.
+// Probe refuses to fall back to an ordinary jj client or an incompatible fjj.
 func Probe() error {
 	backend, err := executable()
 	if err != nil {
 		return err
 	}
 	cmd := exec.Command(backend, "--interface-version")
-	cmd.Args[0] = "fastjj"
+	cmd.Args[0] = "fjj"
 	output, err := cmd.Output()
-	if err != nil || strings.TrimSpace(string(output)) != "fastjj-private-v1 jj=0.37.0" {
-		return errors.New("fastjjui requires fastjj with the private v1 interface and jj 0.37.0")
+	if err != nil || strings.TrimSpace(string(output)) != "fjj-embed-v1 jj=0.37.0" {
+		return errors.New("fjjui requires fjj with the embedded v1 interface and jj 0.37.0")
 	}
 	return nil
 }
@@ -95,7 +95,7 @@ func command(ctx context.Context, backend string, args []string, cwd string, int
 		return nil, nil, err
 	}
 	cmd := exec.CommandContext(ctx, backend, "--request-fd")
-	cmd.Args[0] = "fastjj"
+	cmd.Args[0] = "fjj"
 	// cwd is deliberately supplied only in the request. No repository path is
 	// placed in argv or environment, even for root discovery and workspace switches.
 	cmd.ExtraFiles = []*os.File{read}
@@ -181,5 +181,5 @@ func servePrompts(channel io.ReadWriteCloser, handler PromptHandler, done <-chan
 
 // ShellError is shared by interactive shell and Lua entry points.
 func ShellError() error {
-	return fmt.Errorf("external shell commands are disabled by fastjjui's process privacy policy; use jj commands or Lua's jj API")
+	return fmt.Errorf("external shell commands are disabled by fjjui's process privacy policy; use jj commands or Lua's jj API")
 }

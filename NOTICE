@@ -1,4 +1,4 @@
-fastjj embeds modified jj-cli and jj-lib 0.37.0 by The Jujutsu Authors,
+fjj embeds modified jj-cli and jj-lib 0.37.0 by The Jujutsu Authors,
 under Apache-2.0. Upstream: https://github.com/jj-vcs/jj/tree/v0.37.0
 (commit 11c3dbe17ac0a2172755789613fa8f04a50118a0).
 
@@ -8,10 +8,10 @@ configuration, native text editing and credential callbacks, and removes
 standalone binary/test declarations from its manifest. jj-lib replaces the Git
 subprocess transport with native libgit2 fetch, push leases, remote discovery,
 refspec exclusions and pruning. Repository storage remains the jj 0.37 format.
-fastjj supplies native libssh2 transport, SSH config/key/agent support,
+fjj supplies native libssh2 transport, SSH config/key/agent support,
 thread-based jump tunnels, and kernel process restrictions.
 
-fastjjui embeds modified jjui 0.10.11 by ibrahim dursun and contributors, under
+fjjui embeds modified jjui 0.10.11 by ibrahim dursun and contributors, under
 MIT. Upstream: https://github.com/idursun/jjui/tree/v0.10.11
 (commit cd1da156b1d4d4cae6bedd7fd1f1f23ca42f8f0e).
 The license is retained in vendor/jjui/LICENSE and release licenses/jjui-MIT.txt.

@@ -66,7 +66,7 @@ func init() {
 	flag.BoolVar(&help, "help", false, "Show help information")
 
 	flag.Usage = func() {
-		fmt.Printf("Usage: fastjjui [flags] [location]\n")
+		fmt.Printf("Usage: fjjui [flags] [location]\n")
 		fmt.Println("Flags:")
 		flag.PrintDefaults()
 	}
@@ -131,7 +131,7 @@ func run() int {
 		var err error
 		if location, err = os.Getwd(); err != nil {
 			fmt.Fprintf(os.Stderr, "Error: couldn't determine the current directory: %v.\n", err)
-			fmt.Fprintf(os.Stderr, "Please pass the location of a `jj` repo as an argument to `fastjjui`.\n")
+			fmt.Fprintf(os.Stderr, "Please pass the location of a `jj` repo as an argument to `fjjui`.\n")
 			return 1
 		}
 	}

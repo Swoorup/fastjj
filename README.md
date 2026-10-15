@@ -1,18 +1,20 @@
-# fastjj
+# fjj — embedded Jujutsu
 
-A Rust Jujutsu client that performs repository operations in the current process
-and allows worker threads, while preventing subprocesses from exposing repository
-names, paths, or remote URLs in their command lines.
+A Rust client that embeds Jujutsu, Git, and SSH in one process. Repository work
+runs in-process with worker threads; a mandatory kernel policy prevents external
+programs from being launched.
 
-fastjj embeds **jj 0.37.0**, with an in-process libgit2 implementation of its Git
-transport. It includes **fastjjui**, a privacy-preserving fork of jjui 0.10.11. It works with jj's repository format and keeps jj's commands, revsets,
+fjj embeds **jj 0.37.0**, with an in-process libgit2 implementation of its Git
+transport. It includes **fjjui**, a fork of jjui 0.10.11 connected to the embedded
+backend. It works with jj's repository format and keeps jj's commands, revsets,
 templates, automatic working-copy snapshots, operation history, bookmarks,
 rebasing, and conflict handling. It does not launch an installed `jj` or `git`.
 
 **Supported platforms:** Linux and macOS, on Intel/x86_64 and ARM64/Apple Silicon.
 Linux uses synchronized seccomp filters; macOS uses a process-wide Seatbelt
 profile denying fork and exec. Platforms that cannot install their kernel policy
-are rejected before loading repository configuration. There is no privacy opt-out.
+are rejected before loading repository configuration. The process policy cannot
+be disabled.
 
 ## Build and install
 
@@ -24,27 +26,27 @@ build the bundled libgit2, libssh2, and OpenSSL dependencies. On Debian/Ubuntu:
 sudo apt-get install build-essential pkg-config perl
 cargo build --release --locked
 cargo install --path . --locked
-fastjj privacy
+fjj embed
 ```
 
 On macOS, install Xcode Command Line Tools with `xcode-select --install` and
 pkg-config with `brew install pkg-config`, then run the same Cargo commands.
-The built executable is `target/release/fastjj`. Source installation is from this
+The built executable is `target/release/fjj`. Source installation is from this
 checkout; no crates.io release is published. TLS verification remains enabled.
 
-## jjui
+## fjjui
 
-Run `fastjjui` inside your repository. It supports jjui's graph, previews,
+Run `fjjui` inside your repository. It supports jjui's graph, previews,
 bookmarks, history editing, workspaces, and Git fetch/push while sending command
-arguments and credentials over private inherited descriptors. Install it beside
-`fastjj`; both binaries are included in releases and the Nix package.
+arguments and credentials over inherited descriptors. Install it beside
+`fjj`; both binaries are included in releases and the Nix package.
 
 ```sh
-nix run github:Swoorup/fastjj#jjui
+nix run github:Swoorup/fastjj#fjjui
 ```
 
-Use this bundled fork for private UI operation. Unmodified jjui still exposes
-its backend command arguments, even when `jj` is a symlink to fastjj.
+Use this bundled fork to communicate with the embedded backend. Unmodified jjui
+still exposes its backend command arguments, even when `jj` is a symlink to fjj.
 [The jjui guide](docs/jjui.md) covers supported workflows, SSH credential prompts,
 configuration, source builds, and the restrictions on external shell actions.
 
@@ -60,17 +62,17 @@ nix profile install github:Swoorup/fastjj
 ```
 
 The default package downloads a public GitHub release binary with a pinned
-SHA-256 checksum; it does not compile fastjj or Rust dependencies. It supports
+SHA-256 checksum; it does not compile fjj or Rust dependencies. It supports
 `x86_64-linux`, `aarch64-linux`, `x86_64-darwin`, and `aarch64-darwin`. Nix downloads
 the required packaging tools and runtime libraries as well. Linux executables
 have their interpreter and library paths patched for NixOS. The installed
-`bin/fastjj` is a native executable with no launcher script. macOS requires 13.0
+`bin/fjj` is a native executable with no launcher script. macOS requires 13.0
 or later.
 
 To use it from a NixOS, nix-darwin, or Home Manager flake, add the input:
 
 ```nix
-inputs.fastjj.url = "github:Swoorup/fastjj";
+inputs.fjj.url = "github:Swoorup/fastjj";
 ```
 
 Pass `inputs` to your modules through `specialArgs` (or `extraSpecialArgs` for
@@ -80,25 +82,27 @@ Home Manager), then add the package to `environment.systemPackages` or
 ```nix
 { inputs, pkgs, ... }: {
   environment.systemPackages = [
-    inputs.fastjj.packages.${pkgs.stdenv.hostPlatform.system}.default
+    inputs.fjj.packages.${pkgs.stdenv.hostPlatform.system}.default
   ];
 }
 ```
 
-`packages.<system>.default`, `.fastjj`, and `.fastjjui` select the binary
+`packages.<system>.default`, `.fjj`, and `.fjjui` select the binary
 release recorded in [`nix/binary-release.json`](nix/binary-release.json).
 Following `main` updates the packaging; it selects a newer binary only when that
 manifest is updated. Your consumer flake lock pins the repository revision.
-Maintainers should publish a new version, update all four archive hashes and
-the source commit in the manifest, and run `nix flake check` before pushing.
+Maintainers should verify all four release builds, update the archive hashes and
+source commit in the manifest, and publish the verified assets. CI checks every
+installed package after publication.
 The **Publish verified binaries** workflow can publish an existing successful
 **Release binaries** run without rebuilding: it checks the run's source commit,
 all archive hashes, and embedded provenance against the manifest before upload.
 Create the version tag at that source commit before dispatching the workflow.
 Interrupted uploads can be resumed; existing assets must match exactly.
 
-For private arguments, run `nix run github:Swoorup/fastjj -- --request-stdin < request.json`
-using the [request format below](#keep-the-clients-own-arguments-private).
+To keep arguments out of the process command line, run
+`nix run github:Swoorup/fastjj -- --request-stdin < request.json`
+using the [request format below](#send-arguments-to-the-embedded-client).
 Ordinary command arguments are visible to process observers, including in Nix's
 own command line.
 
@@ -117,23 +121,23 @@ builds and tests optimized binaries on native runners for:
 Pushes to `main` and manual workflow runs upload downloadable build artifacts.
 Changes confined to Nix packaging and the CI workflow skip rebuilding unchanged
 release binaries; source and installed-package CI checks still run.
-Version tags such as `v0.2.1` additionally publish all four archives to
+Version tags such as `v0.2.2` additionally publish all four archives to
 [GitHub Releases](https://github.com/Swoorup/fastjj/releases), after every target
 passes its optimized tests. The tag must match the version in `Cargo.toml`.
 Published assets are never overwritten: a repeated tag build must match the
 existing assets, or the publish job fails and a new version is needed. No tag is
 created by the workflow itself.
 
-Each `.tar.gz` includes `fastjj` and `fastjjui`, documentation, licenses, and
+Each `.tar.gz` includes `fjj` and `fjjui`, documentation, licenses, and
 `build-info.json` recording the exact source commit. An adjacent `.sha256` file
 provides its checksum. After extracting an archive, install both executables
-in the same directory on your PATH and run `fastjj privacy`.
+in the same directory on your PATH and run `fjj embed`.
 
 ```sh
 # Linux
-sha256sum --check fastjj-v0.2.1-x86_64-unknown-linux-gnu.tar.gz.sha256
+sha256sum --check fjj-v0.2.2-x86_64-unknown-linux-gnu.tar.gz.sha256
 # macOS (choose the matching architecture's archive)
-shasum -a 256 --check fastjj-v0.2.1-aarch64-apple-darwin.tar.gz.sha256
+shasum -a 256 --check fjj-v0.2.2-aarch64-apple-darwin.tar.gz.sha256
 ```
 
 Linux binaries are built on Ubuntu 24.04 and need a compatible glibc installation.
@@ -143,60 +147,60 @@ They are not Developer ID signed or notarized.
 ## Use jj commands
 
 ```sh
-fastjj git init
-fastjj status
-fastjj diff --git
-fastjj describe -m 'Implement the feature'
-fastjj bookmark create main -r @
-fastjj new
-fastjj log
-fastjj rebase -r @ -d main
-fastjj undo
+fjj git init
+fjj status
+fjj diff --git
+fjj describe -m 'Implement the feature'
+fjj bookmark create main -r @
+fjj new
+fjj log
+fjj rebase -r @ -d main
+fjj undo
 ```
 
 Run from the desired workspace to avoid putting its path in argv. Messages and
-file arguments you type normally are still visible in **fastjj's own** argv.
-For private arguments, use the stdin interface below.
+file arguments you type normally are still visible in **fjj's own** argv.
+To keep arguments out of the process command line, use the stdin interface below.
 
-`fastjj --help` and `fastjj help <command>` provide the embedded jj command
+`fjj --help` and `fjj help <command>` provide the embedded jj command
 reference. Normal jj user/repository configuration, aliases, identity, revsets,
 templates, color, and output remain available. The client always selects native
 Git transport, the built-in pager, text and diff/merge editors, and filesystem scanning
 without Watchman. Configuration cannot enable child processes.
 
-## Keep the client's own arguments private
+## Send arguments to the embedded client
 
 Create a JSON request file with restrictive permissions. Its `args` contain jj
 arguments; `cwd` optionally chooses the working directory without a `-R` argument.
 
 ```json
 {
-  "cwd": "/private/customer/project",
-  "args": ["git", "clone", "https://example.org/private/project.git", "./checkout"]
+  "cwd": "/work/customer/project",
+  "args": ["git", "clone", "https://example.org/team/project.git", "./checkout"]
 }
 ```
 
 ```sh
 chmod 600 request.json
-fastjj --request-stdin < request.json
+fjj --request-stdin < request.json
 ```
 
-Process observers see `fastjj --request-stdin`. The request passes directly into
-jj as an in-memory argument vector; fastjj never starts a process with its data.
-The shell does not pass the redirection's filename to fastjj. Avoid a shell
-command that includes the JSON or private data in its own arguments.
+Process observers see `fjj --request-stdin`. The request passes directly into
+jj as an in-memory argument vector; fjj never starts a process with its data.
+The shell does not pass the redirection's filename to fjj. Avoid a shell
+command that includes the JSON or sensitive data in its own arguments.
 
 The request is one JSON document, bounded to 1 MiB. `args` is required and must
 be an array of strings. Unknown fields and NUL bytes are rejected. After receiving
-EOF, fastjj executes one command and returns its jj exit status. Standard output
+EOF, fjj executes one command and returns its jj exit status. Standard output
 and error remain ordinary jj output, not JSON. Parsing errors do not echo request
-contents. Private mode consumes stdin; commands that need stdin again should use
+contents. The stdin request interface consumes stdin; commands that need stdin again should use
 their file or message options instead. The built-in text editor reads the
-controlling terminal directly and therefore also works with private requests.
+controlling terminal directly and therefore also works with embedded requests.
 
 ## Built-in description editor
 
-`fastjj describe` and other commands that edit descriptions open a native,
+`fjj describe` and other commands that edit descriptions open a native,
 line-oriented editor on the controlling terminal. It displays the current text
 and accepts replacement lines, including Unicode. Finish with `.save`, keep the
 original with `.keep`, or abort with `.cancel`. `.undo` removes the last entered
@@ -222,13 +226,13 @@ compression, and `ConnectTimeout` are supported. `PreferredAuthentications`,
 `KbdInteractiveAuthentication` control native key, password, and terminal
 keyboard-interactive authentication.
 `FASTJJ_SSH_CONFIG` can select a separate SSH configuration file; this replaces
-the two default files. Its value is an environment variable, outside argv privacy.
+the two default files. Its value is an environment variable, visible according to the operating system's environment access controls.
 
 Ed25519, ECDSA, and RSA private keys are read directly. Encrypted keys prompt on
 the controlling terminal with echo disabled, also in `--request-stdin` mode.
 Passphrases are cached only for the current invocation and their buffers are
 cleared on drop. `BatchMode yes` disables terminal prompts. Existing agents can
-provide unlocked keys or hardware-backed identities; fastjj never starts an
+provide unlocked keys or hardware-backed identities; fjj never starts an
 agent. On macOS, `UseKeychain yes` also tries accessible legacy OpenSSH keychain
 entries through the native Security framework. Apple's protected keychain items
 and hardware key operations should be accessed through an existing SSH agent.
@@ -259,21 +263,21 @@ Host github-work
 ```
 
 Register the corresponding public key with GitHub and configure a remote such as
-`github-work:OWNER/REPO.git`. Use a private stdin request when setting that URL.
-Then run `fastjj git fetch` or `fastjj git push` inside the repository. For SSH
+`github-work:OWNER/REPO.git`. Use a stdin request when setting that URL.
+Then run `fjj git fetch` or `fjj git push` inside the repository. For SSH
 over port 443, use `HostName ssh.github.com` and `Port 443` with its verified host
 key. Git credential helpers for HTTPS still cannot execute; use native terminal
 credentials instead.
 
 Commands whose purpose is running other programs (`util exec`, `fix`, `util gc`,
-and `config edit`) return an explicit privacy error. External text editors,
+and `config edit`) return an explicit process-policy error. External text editors,
 diff/merge tools, signing programs, hooks, and credential helpers also cannot run.
 Use the built-in text editor or `describe -m` / `commit -m`, `config set`, and
 built-in diff/merge editors.
 Signing with GPG or ssh-keygen requires external tooling and is unavailable.
 Run repository maintenance separately when needed.
 
-See [the privacy model](docs/privacy.md) for the guarantees, kernel policy, and
+See [the embedded process model](docs/embed.md) for the guarantees, kernel policy, and
 scope of protection. Existing repositories created by newer jj versions are
 subject to jj 0.37's format compatibility; back up repositories before migrating
 between versions.
@@ -284,12 +288,12 @@ between versions.
 cargo fmt --all --check
 cargo clippy --locked --all-targets --no-deps -- -D warnings
 cargo test --locked
-python3 scripts/verify_process_privacy.py target/debug/fastjj
+python3 scripts/verify_embed.py target/debug/fjj
 ```
 
 The last check is Linux-only and requires `strace`. It traces real init, snapshot, diff, history,
 clone, fetch, push, and forbidden-editor requests and checks for child processes
-and private argv. Rust tests exercise kernel enforcement, inherited restrictions
+and argument exposure. Rust tests exercise kernel enforcement, inherited restrictions
 on existing and new threads, the x32 ABI, stdin argv, configuration overrides,
 history edits, and native Git transport. The ignored `guard_probe` fixture is
 actually executed in isolation by the `kernel_guard` test so its irreversible
@@ -307,12 +311,12 @@ SSH servers and keys. It performs real clone/fetch/push with custom Ed25519 and
 RSA keys, directly encrypted keys through a PTY, an encrypted agent key with
 `IdentitiesOnly`, aliases and includes, and a two-hop native `ProxyJump`. It also
 checks unknown/changed/revoked host rejection, identity selection, external
-command rejection, and process privacy. Linux traces each client process tree;
+command rejection, and embedded process enforcement. Linux traces each client process tree;
 both platforms observe argv and run kernel subprocess-denial tests. Install
 OpenSSH server/client tools and `strace` on Linux to run it locally:
 
 ```sh
-python3 scripts/verify_ssh.py target/debug/fastjj
+python3 scripts/verify_ssh.py target/debug/fjj
 ```
 
 CI and release builds also run `scripts/verify_https_clone.py` against a small
@@ -325,4 +329,4 @@ network services.
 Apache-2.0. The CLI fork is in `vendor/jj-cli`, with upstream notices retained.
 [NOTICE](NOTICE) records its source and changes. `vendor/jj-lib` contains the native Git transport adaptation. The jjui fork in
 `vendor/jjui` retains its MIT license. To update either upstream, preserve the
-private process boundaries and rerun kernel, transport, UI, and syscall tests.
+embedded process boundaries and rerun kernel, transport, UI, and syscall tests.

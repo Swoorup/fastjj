@@ -30,13 +30,13 @@ def package(root, binary, target, output, commit, tag=None, ui_binary=None):
     if tag is not None and tag != f"v{version}":
         raise ValueError("release tag must equal v plus the Cargo.toml package version")
 
-    name = f"fastjj-v{version}-{target}"
-    files = {"fastjj": binary.read_bytes(), "fastjjui": (ui_binary or binary.with_name("fastjjui")).read_bytes()}
+    name = f"fjj-v{version}-{target}"
+    files = {"fjj": binary.read_bytes(), "fjjui": (ui_binary or binary.with_name("fjjui")).read_bytes()}
     files["licenses/jjui-MIT.txt"] = (root / "vendor/jjui/LICENSE").read_bytes()
-    for filename in ["LICENSE", "NOTICE", "README.md", "docs/privacy.md", "docs/jjui.md"]:
+    for filename in ["LICENSE", "NOTICE", "README.md", "docs/embed.md", "docs/jjui.md"]:
         files[filename] = (root / filename).read_bytes()
     files["build-info.json"] = (json.dumps({
-        "name":"fastjj", "version":version, "target":target, "source_commit":commit,
+        "name":"fjj", "version":version, "target":target, "source_commit":commit,
     }, indent=2, sort_keys=True) + "\n").encode()
     output.mkdir(parents=True, exist_ok=True)
     archive = output / f"{name}.tar.gz"
@@ -46,7 +46,7 @@ def package(root, binary, target, output, commit, tag=None, ui_binary=None):
                 for filename, data in sorted(files.items()):
                     entry = tarfile.TarInfo(f"{name}/{filename}")
                     entry.size = len(data)
-                    entry.mode = 0o755 if filename in ("fastjj", "fastjjui") else 0o644
+                    entry.mode = 0o755 if filename in ("fjj", "fjjui") else 0o644
                     entry.mtime = 0
                     tar.addfile(entry, io.BytesIO(data))
     digest = hashlib.sha256(archive.read_bytes()).hexdigest()

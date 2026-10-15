@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Exercise native SSH Git against disposable servers, keys, agents and PTYs.
 
-Fixture helpers run outside fastjj. Only the client process tree is audited.
+Fixture helpers run outside fjj. Only the client process tree is audited.
 No user keys, SSH configuration or GitHub repository is modified.
 """
 
@@ -133,7 +133,7 @@ def main():
     if lua_prompts and args_ui is None:
         parser.error("--lua-prompts requires --ui-binary")
     sshd = shutil.which("sshd") or "/usr/sbin/sshd"
-    with tempfile.TemporaryDirectory(prefix="fastjj-ssh-") as directory:
+    with tempfile.TemporaryDirectory(prefix="fjj-ssh-") as directory:
         root = Path(directory)
         config = root / "jj.toml"
         config.write_text("[git]\ncolocate=false\n[user]\nname='SSH Test'\nemail='test@example.invalid'\n[ui]\npaginate='never'\ncolor='never'\n")

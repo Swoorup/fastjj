@@ -38,24 +38,24 @@ jobs:
       - run: cargo fmt --all --check
       - run: cargo clippy --locked --all-targets --no-deps -- -D warnings
       - run: cargo test --locked -- --nocapture
-      - name: Build fastjjui
+      - name: Build fjjui
         working-directory: vendor/jjui
         env:
           CGO_ENABLED: '0'
-        run: go build -trimpath -ldflags '-s -w -X main.Version=fastjjui-0.2.1-jjui-0.10.11' -o ../../target/debug/fastjjui ./cmd/jjui
+        run: go build -trimpath -ldflags '-s -w -X main.Version=fjjui-0.2.2-jjui-0.10.11' -o ../../target/debug/fjjui ./cmd/jjui
       - name: Verify native HTTPS transport and certificate trust
-        run: python3 scripts/verify_https_clone.py target/debug/fastjj
+        run: python3 scripts/verify_https_clone.py target/debug/fjj
       - run: python3 -m unittest discover -s tests -p 'test_*.py'
       - if: runner.os == 'Linux'
         run: |
           sudo apt-get update && sudo apt-get install -y strace openssh-server
           sudo install -d -m 0755 /run/sshd
       - name: Verify native SSH authentication, configuration, tunnels, and privacy
-        run: python3 scripts/verify_ssh.py target/debug/fastjj --ui-binary target/debug/fastjjui --lua-prompts
+        run: python3 scripts/verify_ssh.py target/debug/fjj --ui-binary target/debug/fjjui --lua-prompts
       - name: Verify real jjui workflows and private process arguments
-        run: python3 scripts/verify_jjui.py target/debug/fastjj target/debug/fastjjui
+        run: python3 scripts/verify_jjui.py target/debug/fjj target/debug/fjjui
       - if: runner.os == 'Linux'
-        run: python3 scripts/verify_process_privacy.py target/debug/fastjj
+        run: python3 scripts/verify_embed.py target/debug/fjj
 
   nix:
     name: Nix binary (${{ matrix.runner }})
@@ -96,4 +96,4 @@ jobs:
       - name: Verify real jjui workflows with the installed Nix package
         run: python3 scripts/verify_jjui.py "$FASTJJ_BINARY" "$FASTJJUI_BINARY"
       - if: runner.os == 'Linux'
-        run: python3 scripts/verify_process_privacy.py "$FASTJJ_BINARY"
+        run: python3 scripts/verify_embed.py "$FASTJJ_BINARY"

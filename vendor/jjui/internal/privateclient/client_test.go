@@ -58,7 +58,7 @@ func TestPrivateDescriptorsPreserveStdinAndPrompt(t *testing.T) {
 		}
 		cmd.Env = append(os.Environ(), "FASTJJ_PRIVATE_HELPER=1")
 		cmd.Stdin = strings.NewReader("description from stdin λ\n")
-		if !reflect.DeepEqual(cmd.Args, []string{"fastjj", "--request-fd"}) {
+		if !reflect.DeepEqual(cmd.Args, []string{"fjj", "--request-fd"}) {
 			t.Fatal(cmd.Args)
 		}
 		output, err := cmd.Output()
@@ -109,7 +109,7 @@ func TestRequestLimitAndStartFailure(t *testing.T) {
 	if _, _, err := command(context.Background(), "missing", []string{strings.Repeat("x", maxRequest)}, "", false); err == nil {
 		t.Fatal("oversized request accepted")
 	}
-	cmd, cleanup, err := command(context.Background(), "/nonexistent-fastjj", []string{"status"}, "", false)
+	cmd, cleanup, err := command(context.Background(), "/nonexistent-fjj", []string{"status"}, "", false)
 	if err != nil {
 		t.Fatal(err)
 	}

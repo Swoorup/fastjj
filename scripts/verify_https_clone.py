@@ -10,8 +10,8 @@ import tempfile
 
 
 def main():
-    binary = Path(sys.argv[1] if len(sys.argv) > 1 else "target/debug/fastjj").resolve()
-    with tempfile.TemporaryDirectory(prefix="fastjj-https-") as directory:
+    binary = Path(sys.argv[1] if len(sys.argv) > 1 else "target/debug/fjj").resolve()
+    with tempfile.TemporaryDirectory(prefix="fjj-https-") as directory:
         root = Path(directory)
         config = root / "config.toml"
         config.write_text("[user]\nname='Test'\nemail='test@example.invalid'\n[ui]\npaginate='never'\ncolor='never'\n")

@@ -10,7 +10,7 @@ fn built_in_editor_updates_description_without_an_external_editor() {
     let root = tempfile::TempDir::new().unwrap();
     let config = root.path().join("config.toml");
     fs::write(&config, "[user]\nname='Test'\nemail='test@example.invalid'\n[ui]\npaginate='never'\ncolor='never'\n").unwrap();
-    let binary = env!("CARGO_BIN_EXE_fastjj");
+    let binary = env!("CARGO_BIN_EXE_fjj");
     eprintln!("terminal fixture: initialize repository");
     let output = Command::new(binary)
         .current_dir(root.path())
@@ -50,7 +50,7 @@ fn built_in_editor_updates_description_without_an_external_editor() {
         .stdout(Stdio::from(slave.try_clone().unwrap()))
         .stderr(Stdio::from(slave.try_clone().unwrap()));
     // This is the *test runner* setting up the client's controlling terminal
-    // before exec. fastjj subsequently installs its own process-denial policy.
+    // before exec. fjj subsequently installs its own process-denial policy.
     #[cfg(target_os = "macos")]
     let tty_request = libc::c_ulong::from(libc::TIOCSCTTY);
     #[cfg(not(target_os = "macos"))]

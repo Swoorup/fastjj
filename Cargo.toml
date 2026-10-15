@@ -1,11 +1,15 @@
 [package]
 name = "fastjj"
-version = "0.2.1"
+version = "0.2.2"
 edition = "2024"
 rust-version = "1.89"
-description = "A process-private Jujutsu client with in-process Git transport"
+description = "An embedded Jujutsu client with in-process Git and SSH transport"
 license = "Apache-2.0"
 repository = "https://github.com/Swoorup/fastjj"
+
+[[bin]]
+name = "fjj"
+path = "src/main.rs"
 
 [dependencies]
 base64 = "0.22"

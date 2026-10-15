@@ -14,10 +14,10 @@ import tempfile
 def main():
     if not shutil.which("strace"):
         sys.exit("strace is required for the process privacy audit")
-    binary = Path(sys.argv[1] if len(sys.argv) > 1 else "target/debug/fastjj").resolve()
+    binary = Path(sys.argv[1] if len(sys.argv) > 1 else "target/debug/fjj").resolve()
     if not binary.is_file():
-        sys.exit("build fastjj before running the process privacy audit")
-    with tempfile.TemporaryDirectory(prefix="fastjj-audit-") as temp:
+        sys.exit("build fjj before running the process privacy audit")
+    with tempfile.TemporaryDirectory(prefix="fjj-audit-") as temp:
         root = Path(temp)
         repo = root / "CANARY_REPOSITORY_NAME"
         clone = root / "CANARY_CLONE_NAME"

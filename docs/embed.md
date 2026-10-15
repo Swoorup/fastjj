@@ -1,14 +1,14 @@
-# Process privacy
+# Embedded process model
 
 ## Guarantee
 
-Once fastjj starts, it installs a mandatory kernel process policy **before** jj
+Once fjj starts, it installs a mandatory kernel process policy **before** jj
 initialization, configuration loading, or worker-thread creation. It refuses to
-run if any step fails. The kernel prevents fastjj, all its existing threads, and
+run if any step fails. The kernel prevents fjj, all its existing threads, and
 all future threads from creating child processes or executing other programs.
 Repository paths and names therefore cannot be exposed in a subprocess's argv:
 there is no subprocess. Repository reads, writes, diffing, history operations,
-and Git transport run within fastjj. Work parallelizes through threads.
+and Git transport run within fjj. Work parallelizes through threads.
 
 This includes subprocess attempts hidden in dependencies or configuration:
 external editors, shell aliases, Git credential helpers, filters, signing
@@ -22,7 +22,7 @@ mode makes no promise to conceal arguments the caller supplied in argv.
 
 ## jjui boundary
 
-`fastjjui` starts each backend child as `fastjj --request-fd`. Command arguments
+`fjjui` starts each backend child as `fjj --request-fd`. Command arguments
 and cwd travel through descriptor 3; background credential prompts use an
 inherited Unix stream socket at descriptor 4. stdin remains available for inline
 descriptions. There is no askpass subprocess or named credential socket.
@@ -77,7 +77,7 @@ The XNU kernel applies its fork policy check before creating a spawned process.
 
 Apple has deprecated this CLI sandbox API but still provides it on the supported
 macOS releases. An unavailable API or a rejected profile, including an
-incompatible enclosing sandbox, makes fastjj refuse to run. A release must pass
+incompatible enclosing sandbox, makes fjj refuse to run. A release must pass
 real fork, exec, posix_spawn, and inherited-thread restriction tests on both
 Intel and Apple Silicon runners. No fallback invokes an external sandbox helper.
 
@@ -88,7 +88,7 @@ filesystem paths, `/proc/<pid>/cwd`, open files, network destinations, operation
 logs, process memory, or environment variables. It is not a filesystem or network
 sandbox and does not defend against a privileged debugger or an already-running
 service that the user instructs to perform work elsewhere. Existing authentication
-agents remain separate services and are not started by fastjj.
+agents remain separate services and are not started by fjj.
 
 Native SSH reads keys and configuration inside the process. Encrypted-key
 prompts use the controlling terminal with echo disabled; passphrases never
@@ -96,7 +96,7 @@ enter argv or request environment variables. `ProxyJump` connections use worker
 threads and SSH direct-tcpip channels. Every hop verifies its own host key before
 authentication. Arbitrary command-based proxies and configuration conditions
 cannot execute. The remote SSH server receives the Git repository path and may
-run its own Git process; fastjj's process policy governs the local client.
+run its own Git process; fjj's process policy governs the local client.
 
 Avoid putting secrets in normal CLI arguments or remote URLs. Read requests from
 a protected file or an application-held pipe; do not embed their JSON in an

@@ -21,8 +21,8 @@ class ReleasePackageTests(unittest.TestCase):
         (self.root / "docs").mkdir()
         (self.root / "vendor/jjui").mkdir(parents=True)
         (self.root / "vendor/jjui/LICENSE").write_text("MIT license")
-        (self.root / "fastjjui").write_bytes(b"native UI executable")
-        for name in ["LICENSE", "NOTICE", "README.md", "docs/privacy.md", "docs/jjui.md"]:
+        (self.root / "fjjui").write_bytes(b"native UI executable")
+        for name in ["LICENSE", "NOTICE", "README.md", "docs/embed.md", "docs/jjui.md"]:
             (self.root / name).write_text(name + "\n")
         self.binary = self.root / "binary"
         self.binary.write_bytes(b"executable payload")
@@ -42,10 +42,10 @@ class ReleasePackageTests(unittest.TestCase):
                         self.assertFalse(entry.name.startswith("/"))
                         self.assertNotIn("..", Path(entry.name).parts)
                         self.assertNotIn(str(self.root), entry.name)
-                    binary = next(e for e in entries if e.name.endswith("/fastjj"))
+                    binary = next(e for e in entries if e.name.endswith("/fjj"))
                     self.assertEqual(binary.mode, 0o755)
                     self.assertEqual(tar.extractfile(binary).read(), self.binary.read_bytes())
-                    ui = next(e for e in entries if e.name.endswith("/fastjjui"))
+                    ui = next(e for e in entries if e.name.endswith("/fjjui"))
                     self.assertEqual(ui.mode, 0o755)
                     self.assertEqual(tar.extractfile(ui).read(), b"native UI executable")
                     info = next(e for e in entries if e.name.endswith("/build-info.json"))

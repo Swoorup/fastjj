@@ -67,23 +67,23 @@ jobs:
           test "$host" = "$TARGET"
       - name: Test optimized binary and kernel privacy
         run: cargo test --release --locked --target "$TARGET" -- --nocapture
-      - name: Build fastjjui
+      - name: Build fjjui
         working-directory: vendor/jjui
         env:
           CGO_ENABLED: '0'
-        run: go build -trimpath -ldflags '-s -w -X main.Version=fastjjui-0.2.1-jjui-0.10.11' -o "../../target/$TARGET/release/fastjjui" ./cmd/jjui
+        run: go build -trimpath -ldflags '-s -w -X main.Version=fjjui-0.2.2-jjui-0.10.11' -o "../../target/$TARGET/release/fjjui" ./cmd/jjui
       - name: Verify native HTTPS transport and certificate trust
-        run: python3 scripts/verify_https_clone.py "target/$TARGET/release/fastjj"
+        run: python3 scripts/verify_https_clone.py "target/$TARGET/release/fjj"
       - if: runner.os == 'Linux'
         run: |
           sudo apt-get update && sudo apt-get install -y strace openssh-server
           sudo install -d -m 0755 /run/sshd
       - name: Verify native SSH authentication, configuration, tunnels, and privacy
-        run: python3 scripts/verify_ssh.py "target/$TARGET/release/fastjj" --ui-binary "target/$TARGET/release/fastjjui" --lua-prompts
+        run: python3 scripts/verify_ssh.py "target/$TARGET/release/fjj" --ui-binary "target/$TARGET/release/fjjui" --lua-prompts
       - name: Verify real jjui workflows and private process arguments
-        run: python3 scripts/verify_jjui.py "target/$TARGET/release/fastjj" "target/$TARGET/release/fastjjui"
+        run: python3 scripts/verify_jjui.py "target/$TARGET/release/fjj" "target/$TARGET/release/fjjui"
       - if: runner.os == 'Linux'
-        run: python3 scripts/verify_process_privacy.py "target/$TARGET/release/fastjj"
+        run: python3 scripts/verify_embed.py "target/$TARGET/release/fjj"
       - name: Test release packaging
         run: python3 -m unittest discover -s tests -p 'test_*.py'
       - name: Package binary, license, documentation, and checksums
@@ -92,7 +92,7 @@ jobs:
           set -euo pipefail
           # Keep the array nonempty: macOS Bash 3 treats an empty array as
           # unbound under set -u, even when it was explicitly initialized.
-          package_args=(--binary "target/$TARGET/release/fastjj"
+          package_args=(--binary "target/$TARGET/release/fjj"
                         --target "$TARGET" --commit "$SOURCE_COMMIT")
           if [[ -n "$RELEASE_TAG" ]]; then
             package_args+=(--tag "$RELEASE_TAG")
@@ -100,7 +100,7 @@ jobs:
           python3 scripts/package_release.py "${package_args[@]}"
       - uses: actions/upload-artifact@v4
         with:
-          name: fastjj-${{ matrix.target }}
+          name: fjj-${{ matrix.target }}
           path: dist/*
           if-no-files-found: error
           retention-days: 30
@@ -114,7 +114,7 @@ jobs:
     steps:
       - uses: actions/download-artifact@v4
         with:
-          pattern: fastjj-*
+          pattern: fjj-*
           merge-multiple: true
           path: dist
       - name: Publish versioned GitHub release
@@ -138,5 +138,5 @@ jobs:
             done
           else
             gh release create "$RELEASE_TAG" ./*.tar.gz ./*.sha256 \
-              --verify-tag --title "fastjj $RELEASE_TAG" --generate-notes
+              --verify-tag --title "fjj $RELEASE_TAG" --generate-notes
           fi

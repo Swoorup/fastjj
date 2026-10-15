@@ -76,7 +76,7 @@ backend = "none"
 
 /// Hand argv to jj verbatim, adding only its in-memory application name.
 pub fn jj_args(args: Vec<OsString>) -> Vec<OsString> {
-    let mut result = vec![OsString::from("fastjj")];
+    let mut result = vec![OsString::from("fjj")];
     result.extend(args);
     result
 }
