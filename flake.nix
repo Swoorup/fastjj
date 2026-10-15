@@ -1,5 +1,5 @@
 {
-  description = "Prebuilt fastjj binaries for Linux and macOS";
+  description = "Prebuilt fjj binaries for Linux and macOS";
 
   # 26.05 supports Intel macOS as well as Apple Silicon and both Linux targets.
   inputs.nixpkgs.url = "github:NixOS/nixpkgs/nixos-26.05";
@@ -16,38 +16,38 @@
       packages = forAllSystems (
         system:
         let
-          fastjj = (pkgsFor system).callPackage ./nix/package.nix { inherit release; };
+          fjj = (pkgsFor system).callPackage ./nix/package.nix { inherit release; };
         in
         {
-          inherit fastjj;
-          fastjjui = fastjj;
-          default = fastjj;
+          inherit fjj;
+          fjjui = fjj;
+          default = fjj;
         }
       );
 
       apps = forAllSystems (
         system:
         let
-          fastjj = {
+          fjj = {
             type = "app";
-            program = "${self.packages.${system}.fastjj}/bin/fastjj";
-            meta.description = "A process-private Jujutsu client";
+            program = "${self.packages.${system}.fjj}/bin/fjj";
+            meta.description = "An embedded Jujutsu client";
           };
           jjui = {
             type = "app";
-            program = "${self.packages.${system}.fastjj}/bin/fastjjui";
-            meta.description = "Jujutsu UI with private command and credential channels";
+            program = "${self.packages.${system}.fjj}/bin/fjjui";
+            meta.description = "Jujutsu UI connected to the embedded backend";
           };
         in
         {
-          inherit fastjj jjui;
-          fastjjui = jjui;
-          default = fastjj;
+          inherit fjj jjui;
+          fjjui = jjui;
+          default = fjj;
         }
       );
 
       checks = forAllSystems (system: {
-        inherit (self.packages.${system}) fastjj;
+        inherit (self.packages.${system}) fjj;
       });
       formatter = forAllSystems (system: (pkgsFor system).nixfmt);
     };
