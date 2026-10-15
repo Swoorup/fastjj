@@ -8,6 +8,7 @@ import os
 from pathlib import Path
 import pty
 import re
+import select
 import shutil
 import signal
 import struct
@@ -77,19 +78,42 @@ class UI:
             time.sleep(.01)
 
     def close(self):
-        if self.child.poll() is None:
-            self.send("\x1b")
-            self.send("q")
-            try:
-                self.child.wait(timeout=5)
-            except subprocess.TimeoutExpired:
-                # The fixture owns this session, including any tracer and backend.
-                os.killpg(self.child.pid, signal.SIGKILL)
-                self.child.wait(timeout=5)
-                raise AssertionError("UI failed to exit cleanly")
-        self.read()
-        os.close(self.master)
-        assert self.child.returncode == 0, self.text()[-8000:]
+        try:
+            if self.child.poll() is None:
+                self.send("\x1b")
+                self.send("q")
+                deadline = time.monotonic() + 5
+                while self.child.poll() is None:
+                    # Keep servicing the PTY during shutdown. Blocking in wait()
+                    # can strand the UI in its final write when the buffer fills.
+                    self.read()
+                    remaining = deadline - time.monotonic()
+                    if remaining <= 0:
+                        failure = AssertionError(f"UI failed to exit cleanly: {self.text()[-8000:]}")
+                        try:
+                            # The fixture owns this session and its children.
+                            try:
+                                os.killpg(self.child.pid, signal.SIGKILL)
+                            except PermissionError:
+                                # A group signal can be denied; still try to reap
+                                # the direct child and retain the original error.
+                                self.child.kill()
+                            except ProcessLookupError:
+                                pass
+                            self.child.wait(timeout=5)
+                        except (OSError, subprocess.TimeoutExpired) as error:
+                            failure.add_note(f"UI cleanup also failed: {error}")
+                        raise failure
+                    select.select([self.master], [], [], min(remaining, .05))
+            # A terminated writer can leave several PTY chunks buffered.
+            while True:
+                before = len(self.output)
+                self.read()
+                if len(self.output) == before:
+                    break
+            assert self.child.returncode == 0, self.text()[-8000:]
+        finally:
+            os.close(self.master)
         if self.trace.exists():
             events = self.trace.read_text()
             assert "CANARY" not in events, "private data leaked into process syscalls"
