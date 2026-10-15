@@ -87,6 +87,8 @@ jobs:
           nix run . -- --version
           nix run . -- embed
           nix run .#fjjui -- --version
+      - name: Verify jj config discovery with the installed Nix package
+        run: python3 scripts/verify_config.py "$FJJ_BINARY"
       - name: Verify HTTPS with the installed Nix package
         run: python3 scripts/verify_https_clone.py "$FJJ_BINARY"
       - if: runner.os == 'Linux'
