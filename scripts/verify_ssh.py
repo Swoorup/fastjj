@@ -30,15 +30,27 @@ def checked(argv, **kwargs):
     return result
 
 
-def audit_trace(path):
+def audit_trace(path, editor_service=False):
     events = path.read_text()
     for private in ["REPOSITORY_CANARY", "KEY_CANARY", "PASSPHRASE_CANARY"]:
         assert private not in events, f"private value appeared in process syscalls: {private}"
     execs = [line for line in events.splitlines() if re.search(r"\bexecve(?:at)?\(", line)]
-    assert len(execs) == 1 and "--request-stdin" in execs[0], execs
+    assert len(execs) == (2 if editor_service else 1) and "--request-stdin" in execs[0], execs
+    if editor_service:
+        assert json.dumps(["fjj", "--editor-service"]) in execs[1], execs
+    children = []
+    unfinished = {}
     for line in events.splitlines():
+        pid = line.split(maxsplit=1)[0]
+        if "<unfinished ...>" in line:
+            unfinished[pid] = line
+            continue
+        if " resumed>" in line:
+            line = unfinished.pop(pid, "") + line
         if re.search(r"\b(?:clone3?|fork|vfork)\(", line) and re.search(r"= [1-9][0-9]*$", line):
-            assert "CLONE_THREAD" in line, line
+            if "CLONE_THREAD" not in line:
+                children.append(line)
+    assert len(children) == int(editor_service), children
 
 
 def private_command(binary, environment, cwd, args, root, password=None, expected_error=None):
@@ -113,7 +125,7 @@ def private_command(binary, environment, cwd, args, root, password=None, expecte
             os.close(master)
             os.close(slave)
     if sys.platform.startswith("linux"):
-        audit_trace(trace)
+        audit_trace(trace, editor_service=environment.get("JJ_EDITOR") == "/usr/bin/false")
     if expected_error:
         assert code != 0 and expected_error in output, output
     else:
@@ -126,6 +138,7 @@ def main():
     parser.add_argument("binary", type=Path)
     parser.add_argument("--ui-binary", type=Path)
     parser.add_argument("--lua-prompts", action="store_true")
+    parser.add_argument("--external-editor", action="store_true", help="verify transport with the trusted editor service enabled")
     args = parser.parse_args()
     binary = args.binary.resolve()
     args_ui = args.ui_binary.resolve() if args.ui_binary else None
@@ -139,6 +152,7 @@ def main():
         config.write_text("[git]\ncolocate=false\n[user]\nname='SSH Test'\nemail='test@example.invalid'\n[ui]\npaginate='never'\ncolor='never'\n")
         environment = os.environ.copy()
         environment.update(JJ_CONFIG=str(config), RAYON_NUM_THREADS="2", GIT_CONFIG_NOSYSTEM="1")
+        environment["JJ_EDITOR"] = "/usr/bin/false" if args.external_editor else ":builtin"
         for name in ["SSH_AUTH_SOCK", "SSH_AGENT_PID", "JJ_CONFIG_TOML", "COMPLETE"]:
             environment.pop(name, None)
         ssh_config = root / "ssh_config"

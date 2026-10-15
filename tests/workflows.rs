@@ -30,6 +30,7 @@ impl Fixture {
         command
             .current_dir(cwd)
             .env("JJ_CONFIG", &self.config)
+            .env("JJ_EDITOR", ":builtin")
             .env("RAYON_NUM_THREADS", "2")
             .env_remove("JJ_CONFIG_TOML")
             .env_remove("COMPLETE")
@@ -366,6 +367,66 @@ fn user_config_is_preserved_before_and_after_subcommands() {
     assert_eq!(
         String::from_utf8_lossy(&output.stdout).trim(),
         "Private Override"
+    );
+}
+
+#[test]
+fn background_requests_cannot_take_the_uis_terminal_for_editing() {
+    use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
+    use std::os::unix::net::UnixStream;
+    use std::os::unix::process::CommandExt;
+
+    let f = Fixture::new();
+    let repo = f.init("background-editor");
+    let (reader, mut writer) = UnixStream::pair().unwrap();
+    let (prompt, _prompt_peer) = UnixStream::pair().unwrap();
+    // Keep both sources above the protocol's fixed descriptors so dup2 cannot
+    // overwrite the other source when tests run concurrently.
+    let duplicate = |fd| {
+        let fd = unsafe { libc::fcntl(fd, libc::F_DUPFD_CLOEXEC, 10) };
+        assert!(fd >= 0);
+        unsafe { OwnedFd::from_raw_fd(fd) }
+    };
+    let request_fd = duplicate(reader.as_raw_fd());
+    let prompt_fd = duplicate(prompt.as_raw_fd());
+    let request_raw = request_fd.as_raw_fd();
+    let prompt_raw = prompt_fd.as_raw_fd();
+    let mut command = f.command(f.root.path());
+    command
+        .arg("--request-fd")
+        .env("JJ_EDITOR", "/usr/bin/false")
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    // SAFETY: the owned descriptors above live through spawn; only
+    // async-signal-safe descriptor operations execute in the child callback.
+    unsafe {
+        command.pre_exec(move || {
+            for (source, target) in [(request_raw, 3), (prompt_raw, 4)] {
+                if libc::dup2(source, target) < 0 || libc::fcntl(target, libc::F_SETFD, 0) < 0 {
+                    return Err(std::io::Error::last_os_error());
+                }
+            }
+            Ok(())
+        });
+    }
+    let child = command.spawn().unwrap();
+    writer
+        .write_all(
+            &serde_json::to_vec(&json!({"args":["describe"],"cwd":repo,"prompt":true})).unwrap(),
+        )
+        .unwrap();
+    drop(writer);
+    let output = child.wait_with_output().unwrap();
+    assert!(!output.status.success());
+    assert!(
+        text(&output).contains("requires terminal handoff"),
+        "{}",
+        text(&output)
+    );
+    assert!(
+        !text(&output).contains("external editor failed"),
+        "{}",
+        text(&output)
     );
 }
 

@@ -4,8 +4,24 @@
 use std::fs::{self, OpenOptions};
 use std::io::{self, BufRead, BufReader, Write};
 use std::path::Path;
+use std::sync::atomic::{AtomicBool, Ordering};
+
+static BACKGROUND_REQUEST: AtomicBool = AtomicBool::new(false);
+
+/// Background UI requests have not handed their terminal to the backend.
+pub fn set_background_request() {
+    BACKGROUND_REQUEST.store(true, Ordering::Relaxed);
+}
 
 pub fn edit(path: &Path) -> io::Result<()> {
+    if BACKGROUND_REQUEST.load(Ordering::Relaxed) {
+        return Err(io::Error::other(
+            "text editing requires terminal handoff; use the UI's external editor action, or provide -m/--stdin",
+        ));
+    }
+    if crate::editor_process::enabled() {
+        return crate::editor_process::edit(path);
+    }
     let original = fs::read_to_string(path)?;
     let mut terminal = OpenOptions::new().read(true).write(true).open("/dev/tty")
         .map_err(|_| io::Error::other("built-in editor requires a controlling terminal; use -m for noninteractive descriptions"))?;

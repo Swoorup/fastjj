@@ -1,8 +1,9 @@
 # fjj — embedded Jujutsu
 
 A Rust client that embeds Jujutsu, Git, and SSH in one process. Repository work
-runs in-process with worker threads; a mandatory kernel policy prevents external
-programs from being launched.
+runs in-process with worker threads; a mandatory kernel policy prevents the
+repository backend from launching external programs. An explicitly selected
+text editor runs through a separate helper with a generic temporary filename.
 
 fjj embeds **jj 0.37.0**, with an in-process libgit2 implementation of its Git
 transport. It includes **fjjui**, a fork of jjui 0.10.11 connected to the embedded
@@ -121,7 +122,7 @@ builds and tests optimized binaries on native runners for:
 Pushes to `main` and manual workflow runs upload downloadable build artifacts.
 Changes confined to Nix packaging and the CI workflow skip rebuilding unchanged
 release binaries; source and installed-package CI checks still run.
-Version tags such as `v0.2.3` additionally publish all four archives to
+Version tags such as `v0.2.4` additionally publish all four archives to
 [GitHub Releases](https://github.com/Swoorup/fastjj/releases), after every target
 passes its optimized tests. The tag must match the version in `Cargo.toml`.
 Published assets are never overwritten: a repeated tag build must match the
@@ -135,9 +136,9 @@ in the same directory on your PATH and run `fjj embed`.
 
 ```sh
 # Linux
-sha256sum --check fjj-v0.2.3-x86_64-unknown-linux-gnu.tar.gz.sha256
+sha256sum --check fjj-v0.2.4-x86_64-unknown-linux-gnu.tar.gz.sha256
 # macOS (choose the matching architecture's archive)
-shasum -a 256 --check fjj-v0.2.3-aarch64-apple-darwin.tar.gz.sha256
+shasum -a 256 --check fjj-v0.2.4-aarch64-apple-darwin.tar.gz.sha256
 ```
 
 Linux binaries are built on Ubuntu 24.04 and need a compatible glibc installation.
@@ -165,8 +166,8 @@ To keep arguments out of the process command line, use the stdin interface below
 `fjj --help` and `fjj help <command>` provide the embedded jj command
 reference. Normal jj user/repository configuration, aliases, identity, revsets,
 templates, color, and output remain available. The client always selects native
-Git transport, the built-in pager, text and diff/merge editors, and filesystem scanning
-without Watchman. Configuration cannot enable child processes.
+Git transport, the built-in pager and diff/merge editors, and filesystem scanning
+without Watchman. Repository configuration cannot enable child processes in the backend.
 
 ### Existing jj configuration
 
@@ -218,9 +219,34 @@ contents. The stdin request interface consumes stdin; commands that need stdin a
 their file or message options instead. The built-in text editor reads the
 controlling terminal directly and therefore also works with embedded requests.
 
-## Built-in description editor
+## Commit-message editors
 
-`fjj describe` and other commands that edit descriptions open a native,
+Set `EDITOR` to use your usual editor in `fjj describe`, other description-editing
+commands, and `fjjui`'s Shift+D action:
+
+```sh
+export EDITOR=nvim
+fjj describe
+fjjui
+```
+
+Selection order is `JJ_EDITOR`, `VISUAL`, then `EDITOR`; empty variables are
+ignored. Quoted arguments work, for example `EDITOR='code --wait'`. Use a command
+that waits until the file is saved and closed. `JJ_EDITOR=:builtin` selects the
+native editor even when another editor variable is set. Select external editors
+through these environment variables; repository `ui.editor` settings cannot
+enable external programs. `fjj config edit` and `fjjui --config` use the same
+text editor.
+
+The editor receives only `COMMIT_EDITMSG`, in a private temporary directory outside
+the repository. Message text travels to the helper over pipes; no repository path
+is appended to the editor's argv. Its working directory is that temporary directory,
+so use absolute paths for any editor-specific configuration arguments.
+The chosen editor and its plugins are trusted external programs and can start
+their own processes. Their own arguments and behavior are outside the backend's
+process guarantee; Git/SSH operations in fjj remain kernel-restricted.
+
+Without a selected external editor, description commands open a native,
 line-oriented editor on the controlling terminal. It displays the current text
 and accepts replacement lines, including Unicode. Finish with `.save`, keep the
 original with `.keep`, or abort with `.cancel`. `.undo` removes the last entered
@@ -289,10 +315,10 @@ over port 443, use `HostName ssh.github.com` and `Port 443` with its verified ho
 key. Git credential helpers for HTTPS still cannot execute; use native terminal
 credentials instead.
 
-Commands whose purpose is running other programs (`util exec`, `fix`, `util gc`,
-and `config edit`) return an explicit process-policy error. External text editors,
-diff/merge tools, signing programs, hooks, and credential helpers also cannot run.
-Use the built-in text editor or `describe -m` / `commit -m`, `config set`, and
+Commands whose purpose is running other programs (`util exec`, `fix`, and `util gc`)
+return an explicit process-policy error. External diff/merge tools, signing
+programs, hooks, and credential helpers also cannot run.
+Use the selected text editor or `describe -m` / `commit -m`, `config set`, and
 built-in diff/merge editors.
 Signing with GPG or ssh-keygen requires external tooling and is unavailable.
 Run repository maintenance separately when needed.
@@ -311,7 +337,7 @@ cargo test --locked
 python3 scripts/verify_embed.py target/debug/fjj
 ```
 
-The last check is Linux-only and requires `strace`. It traces real init, snapshot, diff, history,
+The last check uses the built-in editor mode, is Linux-only, and requires `strace`. It traces real init, snapshot, diff, history,
 clone, fetch, push, and forbidden-editor requests and checks for child processes
 and argument exposure. Rust tests exercise kernel enforcement, inherited restrictions
 on existing and new threads, the x32 ABI, stdin argv, configuration overrides,
@@ -325,6 +351,13 @@ tests use Python 3.11 or newer:
 ```sh
 python3 -m unittest discover -s tests -p 'test_*.py'
 ```
+
+`scripts/verify_editor.py` checks the selected external editor, environment
+precedence, failure/cancellation behavior, private temporary files, config editing,
+and fjjui terminal handoff on all four platforms. It observes live process argv
+on macOS and Linux and audits the full process tree on Linux. SSH checks also run
+with the editor service enabled to verify that credentials and repository paths
+stay out of arguments while the backend's kernel restrictions remain effective.
 
 CI and optimized release builds run `scripts/verify_ssh.py` against disposable
 SSH servers and keys. It performs real clone/fetch/push with custom Ed25519 and

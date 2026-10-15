@@ -24,7 +24,7 @@ def main():
         config = root / "config.toml"
         config.write_text("[git]\ncolocate=false\n[user]\nname='Test'\nemail='test@example.invalid'\n[ui]\npaginate='never'\ncolor='never'\n")
         environment = os.environ.copy()
-        environment.update(JJ_CONFIG=str(config), RAYON_NUM_THREADS="2")
+        environment.update(JJ_CONFIG=str(config), JJ_EDITOR=":builtin", RAYON_NUM_THREADS="2")
         for name in ["COMPLETE", "JJ_CONFIG_TOML"]:
             environment.pop(name, None)
         checks = 0

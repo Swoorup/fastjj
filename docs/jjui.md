@@ -1,6 +1,6 @@
 # fjjui and the embedded backend
 
-`fjjui` is the bundled fork of jjui 0.10.11, paired with fjj 0.2.3 and its
+`fjjui` is the bundled fork of jjui 0.10.11, paired with fjj 0.2.4 and its
 embedded jj 0.37.0. The UI is Go; repository operations and native Git/SSH are
 Rust. Linux and macOS support both x86_64 and ARM64.
 
@@ -32,22 +32,30 @@ operation history, undo/redo, and history editing use the private backend.
 
 - Enter opens the inline description editor. Ctrl+S saves. Its text travels on
   stdin while command arguments travel separately on descriptor 3.
-- Shift+D opens fjj's native terminal description editor. Enter replacement
-  lines and finish with `.save`, or use `.keep` / `.cancel`.
+- Shift+D opens the editor selected by `JJ_EDITOR`, `VISUAL`, or `EDITOR`.
+  Without one, it opens the native terminal editor; finish with `.save`, or use
+  `.keep` / `.cancel`. `JJ_EDITOR=:builtin` explicitly selects the native editor.
 - `g`, then `f` or `p`, opens fetch or push choices. Enter runs the selection.
   Encrypted SSH keys, host-key confirmation, HTTPS usernames/tokens, and SSH
   password/keyboard-interactive authentication use the UI credential panel.
   Secrets are masked; Escape cancels. SSH agent authentication remains native.
 - `:` runs a jj command with terminal access and private arguments. Commands
   needing the built-in diff or merge editor can take over the terminal normally.
-- `fjjui --config` uses fjj's built-in text editor.
+- `fjjui --config` uses the same selected text editor.
 
-The backend's restrictions still apply: external editors, signing commands,
+The backend's restrictions still apply: external diff/merge tools, signing commands,
 credential helpers, `fix`, and commands that require external programs cannot
 execute. Shell actions (`$`, Lua `exec_shell`, `os.execute`, `io.popen`) return a
 privacy error. Use jj actions or Lua's jj API for repository automation. Clipboard
 support may start the platform clipboard utility with fixed arguments and send
 clipboard text over stdin; no repository data is placed in its argv.
+
+The external text editor receives a generic `COMMIT_EDITMSG` filename in a private
+temporary directory. Repository paths and original config filenames are never
+appended to its argv. The editor and its plugins are trusted programs outside the
+backend sandbox; see [the editor boundary](embed.md#trusted-text-editor).
+Background Lua `jj(...)` calls must supply messages with `-m` or `--stdin`;
+interactive editors require the terminal handoff used by Shift+D or `:`.
 
 ## Process boundary
 
@@ -68,8 +76,9 @@ and credential frames to 128 KiB. EOF, cancellation, malformed data, and oversiz
 frames fail rather than falling back to an external helper.
 
 The startup probe uses the constant `fjj --interface-version` command. fjj
-installs its kernel subprocess prohibition before processing any request, so
-Git, SSH, and editors inside the backend cannot create another process. The UI
+installs its kernel subprocess prohibition before processing any request. An
+environment-selected text editor uses the separate helper started before that
+policy; Git, SSH, and diff/merge tools inside the backend cannot create another process. The UI
 must be able to start these backend children; its fixed-argument command factory,
 blocked shell entry points, and audited clipboard calls enforce the UI boundary.
 This is a separate boundary from the backend's kernel policy.
@@ -88,7 +97,7 @@ Build fjj first, then install Go 1.27.2 or newer and build the UI beside it:
 ```sh
 cargo build --release --locked
 (cd vendor/jjui && CGO_ENABLED=0 go build -trimpath \
-  -ldflags '-s -w -X main.Version=fjjui-0.2.3-jjui-0.10.11' \
+  -ldflags '-s -w -X main.Version=fjjui-0.2.4-jjui-0.10.11' \
   -o ../../target/release/fjjui ./cmd/jjui)
 (cd vendor/jjui && go test ./...)
 python3 scripts/verify_jjui.py target/release/fjj target/release/fjjui

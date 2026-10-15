@@ -15,6 +15,7 @@ fn built_in_editor_updates_description_without_an_external_editor() {
     let output = Command::new(binary)
         .current_dir(root.path())
         .env("JJ_CONFIG", &config)
+        .env("JJ_EDITOR", ":builtin")
         .args(["git", "init", "repo"])
         .output()
         .unwrap();
@@ -45,6 +46,7 @@ fn built_in_editor_updates_description_without_an_external_editor() {
     command
         .current_dir(root.path().join("repo"))
         .env("JJ_CONFIG", &config)
+        .env("JJ_EDITOR", ":builtin")
         .arg("describe")
         .stdin(Stdio::from(slave.try_clone().unwrap()))
         .stdout(Stdio::from(slave.try_clone().unwrap()))
@@ -133,6 +135,7 @@ fn built_in_editor_updates_description_without_an_external_editor() {
     let output = Command::new(binary)
         .current_dir(root.path().join("repo"))
         .env("JJ_CONFIG", &config)
+        .env("JJ_EDITOR", ":builtin")
         .args(["log", "-r", "@", "--no-graph", "-T", "description"])
         .output()
         .unwrap();

@@ -2,23 +2,48 @@
 
 ## Guarantee
 
-Once fjj starts, it installs a mandatory kernel process policy **before** jj
+The repository backend installs a mandatory kernel process policy **before** jj
 initialization, configuration loading, or worker-thread creation. It refuses to
-run if any step fails. The kernel prevents fjj, all its existing threads, and
+run if any step fails. The kernel prevents the repository backend, all its existing threads, and
 all future threads from creating child processes or executing other programs.
-Repository paths and names therefore cannot be exposed in a subprocess's argv:
-there is no subprocess. Repository reads, writes, diffing, history operations,
+Repository reads, writes, diffing, history operations,
 and Git transport run within fjj. Work parallelizes through threads.
 
 This includes subprocess attempts hidden in dependencies or configuration:
-external editors, shell aliases, Git credential helpers, filters, signing
+external diff/merge tools, shell aliases, Git credential helpers, filters, signing
 backends, pagers, Watchman, and Git/SSH wrappers cannot evade the filter. Requests
-to run an external-only feature fail; no fallback weakens the policy.
+to run an external-only feature fail; no fallback weakens the backend policy.
 
 In `--request-stdin` mode, paths, URLs, messages, and other arguments enter through
 stdin and are handed to the embedded CLI in memory. The OS's argv view contains
 only the executable and `--request-stdin`, not the request. The ordinary command
 mode makes no promise to conceal arguments the caller supplied in argv.
+
+## Trusted text editor
+
+When `JJ_EDITOR`, `VISUAL`, or `EDITOR` selects an external editor, fjj first
+starts one helper as `fjj --editor-service`, before installing the backend policy.
+With no editor selected, or `JJ_EDITOR=:builtin`, this helper is not created.
+Its only request is bounded text (up to 16 MiB), transmitted through anonymous
+pipes. The protocol has no command, repository, cwd, or filename fields. The
+helper selects its command only from the inherited editor environment variables;
+repository configuration and jj command arguments cannot select a program.
+
+For each edit, the helper creates a mode-0700 directory under the system `/tmp`
+and a mode-0600 file named `COMMIT_EDITMSG`. It launches the editor with that
+constant basename and uses the temporary directory as cwd and `PWD`. Original
+repository and config filenames never enter the editor argv. The request and
+credential descriptors from fjjui are closed across the helper's exec. Editor
+terminal I/O is separate from the pipe protocol. A nonzero editor exit leaves
+the original text unchanged; successful edits are copied back inside the guarded
+backend. Temporary editor files are removed after the editor finishes.
+
+The selected editor and its plugins are trusted external programs: the backend's
+fork/exec restrictions do not apply to them, and fjj cannot control arguments
+they generate or arguments explicitly supplied in `EDITOR`. This exception does
+not permit the backend to invoke Git, SSH, pagers, shells, or credential helpers.
+Read-only commands with an editor selected may start the fixed-argument helper,
+but the editor itself starts only when text editing is requested.
 
 ## jjui boundary
 

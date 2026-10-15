@@ -20,9 +20,10 @@ import time
 
 
 class UI:
-    def __init__(self, binary, cwd, environment, root, backend_name):
+    def __init__(self, binary, cwd, environment, root, backend_name, editor_argv=None):
         self.trace = root / "jjui-process.trace"
         self.backend_name = backend_name
+        self.editor_argv = editor_argv
         argv = [str(binary)]
         if sys.platform.startswith("linux"):
             assert shutil.which("strace"), "strace is required"
@@ -127,6 +128,10 @@ class UI:
             assert len(execs) > 3, "UI did not exercise backend subprocesses"
             for line in execs[1:]:
                 expected = [json.dumps([self.backend_name, flag]) for flag in ("--request-fd", "--interface-version")]
+                if self.editor_argv is not None:
+                    expected.append(json.dumps(["fjj", "--editor-service"]))
+                    if self.editor_argv:
+                        expected.append(json.dumps(self.editor_argv))
                 assert any(argv in line for argv in expected), line
 
 
@@ -144,7 +149,8 @@ def git_ui(ui_binary, backend, environment, root, cwd, password, expected, cance
     if lua_fetch:
         (config / "config.lua").write_text('function setup(config)\n  config.action("private-fetch", function()\n    local output, err = jj({"git", "fetch"})\n    assert(err == nil, err)\n    assert(output ~= nil)\n    flash("LUA_FETCH_DONE")\n  end, { key = "ctrl+g", scope = "revisions", desc = "private fetch" })\nend\n')
     environment = dict(environment, JJUI_CONFIG_DIR=str(config))
-    ui = UI(ui_binary, cwd, environment, root, backend.name)
+    editor_argv = [] if environment.get("JJ_EDITOR") == "/usr/bin/false" else None
+    ui = UI(ui_binary, cwd, environment, root, backend.name, editor_argv=editor_argv)
     try:
         ui.wait(lambda text: "revisions" in text, "initial revisions")
         if lua_fetch:
@@ -182,7 +188,7 @@ def main():
         ui_config.mkdir()
         env = {key: value for key, value in os.environ.items()
                if not key.startswith(("JJ_", "XDG_"))}
-        env.update(HOME=str(root / "home"), JJUI_CONFIG_DIR=str(ui_config), RAYON_NUM_THREADS="2")
+        env.update(HOME=str(root / "home"), JJ_EDITOR=":builtin", JJUI_CONFIG_DIR=str(ui_config), RAYON_NUM_THREADS="2")
         for key in ["COMPLETE", "JJUI_DEBUG"]:
             env.pop(key, None)
         repo = root / "REPOSITORY_CANARY"
