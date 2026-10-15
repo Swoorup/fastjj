@@ -98,8 +98,10 @@ jobs:
           sudo apt-get update && sudo apt-get install -y strace openssh-server
           sudo install -d -m 0755 /run/sshd
       - name: Verify SSH and privacy with the installed Nix package
-        run: python3 scripts/verify_ssh.py "$FJJ_BINARY" --ui-binary "$FJJUI_BINARY" --lua-prompts
+        run: python3 scripts/verify_ssh.py "$FJJ_BINARY" --ui-binary "$FJJUI_BINARY" --lua-prompts --external-editor
       - name: Verify real jjui workflows with the installed Nix package
         run: python3 scripts/verify_jjui.py "$FJJ_BINARY" "$FJJUI_BINARY"
+      - name: Verify external editors with the installed Nix package
+        run: python3 scripts/verify_editor.py "$FJJ_BINARY" --ui-binary "$FJJUI_BINARY"
       - if: runner.os == 'Linux'
         run: python3 scripts/verify_embed.py "$FJJ_BINARY"
