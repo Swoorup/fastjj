@@ -7,6 +7,7 @@ import sys
 import tempfile
 import tty
 import unittest
+from unittest import mock
 
 
 script = Path(__file__).resolve().parent.parent / "scripts/verify_jjui.py"
@@ -31,7 +32,12 @@ class TerminalFixtureTests(unittest.TestCase):
             )
             os.close(slave)
             try:
-                ui.close()
+                # Model small PTY reads even on hosts that usually return large
+                # chunks. Shutdown must not rescan the entire growing transcript
+                # for every read (quadratic work on macOS).
+                read = os.read
+                with mock.patch.object(fixture.os, "read", side_effect=lambda fd, size: read(fd, min(size, 256))):
+                    ui.close()
                 self.assertEqual(ui.child.returncode, 0)
                 self.assertEqual(len(ui.output), 2 * 1024 * 1024)
             finally:

@@ -39,7 +39,7 @@ class UI:
         os.set_blocking(self.master, False)
         self.output = bytearray()
 
-    def read(self):
+    def drain(self):
         try:
             data = os.read(self.master, 65536)
             self.output.extend(data)
@@ -52,6 +52,9 @@ class UI:
         except OSError as error:
             if error.errno not in (errno.EIO, errno.EAGAIN):
                 raise
+
+    def read(self):
+        self.drain()
         return self.text()
 
     def text(self):
@@ -74,7 +77,7 @@ class UI:
         # Allow input dispatch/rendering before sending a different key sequence.
         end = time.monotonic() + .2
         while time.monotonic() < end:
-            self.read()
+            self.drain()
             time.sleep(.01)
 
     def close(self):
@@ -86,7 +89,10 @@ class UI:
                 while self.child.poll() is None:
                     # Keep servicing the PTY during shutdown. Blocking in wait()
                     # can strand the UI in its final write when the buffer fills.
-                    self.read()
+                    # No text is needed here. Rendering the whole transcript
+                    # per chunk makes draining quadratic, especially with the
+                    # small PTY reads returned by macOS.
+                    self.drain()
                     remaining = deadline - time.monotonic()
                     if remaining <= 0:
                         failure = AssertionError(f"UI failed to exit cleanly: {self.text()[-8000:]}")
@@ -108,7 +114,7 @@ class UI:
             # A terminated writer can leave several PTY chunks buffered.
             while True:
                 before = len(self.output)
-                self.read()
+                self.drain()
                 if len(self.output) == before:
                     break
             assert self.child.returncode == 0, self.text()[-8000:]
