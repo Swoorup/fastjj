@@ -121,7 +121,7 @@ builds and tests optimized binaries on native runners for:
 Pushes to `main` and manual workflow runs upload downloadable build artifacts.
 Changes confined to Nix packaging and the CI workflow skip rebuilding unchanged
 release binaries; source and installed-package CI checks still run.
-Version tags such as `v0.2.2` additionally publish all four archives to
+Version tags such as `v0.2.3` additionally publish all four archives to
 [GitHub Releases](https://github.com/Swoorup/fastjj/releases), after every target
 passes its optimized tests. The tag must match the version in `Cargo.toml`.
 Published assets are never overwritten: a repeated tag build must match the
@@ -135,9 +135,9 @@ in the same directory on your PATH and run `fjj embed`.
 
 ```sh
 # Linux
-sha256sum --check fjj-v0.2.2-x86_64-unknown-linux-gnu.tar.gz.sha256
+sha256sum --check fjj-v0.2.3-x86_64-unknown-linux-gnu.tar.gz.sha256
 # macOS (choose the matching architecture's archive)
-shasum -a 256 --check fjj-v0.2.2-aarch64-apple-darwin.tar.gz.sha256
+shasum -a 256 --check fjj-v0.2.3-aarch64-apple-darwin.tar.gz.sha256
 ```
 
 Linux binaries are built on Ubuntu 24.04 and need a compatible glibc installation.
@@ -167,6 +167,26 @@ reference. Normal jj user/repository configuration, aliases, identity, revsets,
 templates, color, and output remain available. The client always selects native
 Git transport, the built-in pager, text and diff/merge editors, and filesystem scanning
 without Watchman. Configuration cannot enable child processes.
+
+### Existing jj configuration
+
+`fjj` and `fjjui` use your **jj** configuration; no separate `fjj` config is
+needed. On Linux and macOS, files load in this order (later values win):
+
+1. `~/.jjconfig.toml`
+2. `$XDG_CONFIG_HOME/jj/config.toml` (default: `~/.config/jj/config.toml`)
+3. `$XDG_CONFIG_HOME/jj/conf.d/*.toml`, in filename order
+4. On macOS, existing `~/Library/Application Support/jj/config.toml` and
+   `~/Library/Application Support/jj/conf.d/*.toml`, retaining older jj's precedence
+
+`JJ_CONFIG` replaces these default locations; an empty value disables user
+config loading. Repository/workspace config, `JJ_USER` / `JJ_EMAIL`, and
+`--config` retain jj's normal precedence. New user config files use the XDG
+location. This lookup reads files in-process.
+
+Use `fjj config path --user`, `fjj config get user.name`, and
+`fjj config get user.email` to check the active configuration. Config identity
+changes apply to new commits; existing commits keep their recorded authors.
 
 ## Send arguments to the embedded client
 

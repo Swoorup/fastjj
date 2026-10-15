@@ -169,13 +169,16 @@ def main():
     binary, ui_binary = args.binary.resolve(), args.ui_binary.resolve()
     with tempfile.TemporaryDirectory(prefix="fjj-ui-") as directory:
         root = Path(directory)
-        config = root / "config.toml"
+        config = root / "home/.config/jj/config.toml"
+        config.parent.mkdir(parents=True)
         config.write_text("[user]\nname='UI Test'\nemail='ui@example.invalid'\n[git]\ncolocate=false\n[ui]\ncolor='never'\npaginate='never'\n")
         ui_config = root / "ui-config"
         ui_config.mkdir()
-        env = dict(os.environ, JJ_CONFIG=str(config), JJUI_CONFIG_DIR=str(ui_config), RAYON_NUM_THREADS="2")
-        for key in ["JJ_CONFIG_TOML", "COMPLETE", "JJUI_DEBUG"]:
-            env.pop(key,None)
+        env = {key: value for key, value in os.environ.items()
+               if not key.startswith(("JJ_", "XDG_"))}
+        env.update(HOME=str(root / "home"), JJUI_CONFIG_DIR=str(ui_config), RAYON_NUM_THREADS="2")
+        for key in ["COMPLETE", "JJUI_DEBUG"]:
+            env.pop(key, None)
         repo = root / "REPOSITORY_CANARY"
         jj(binary,env,root,["git","init",str(repo)])
         (repo / "FILE_CANARY").write_text("CONTENT_CANARY\n")
@@ -196,6 +199,9 @@ def main():
             before = jj(binary,env,repo,["log","--no-graph","-r","@","-T","change_id"])
             ui.send("n")
             ui.wait(lambda text: before != jj(binary,env,repo,["log","--no-graph","-r","@","-T","change_id"]), "new revision")
+            signature = jj(binary, env, repo, ["log", "--no-graph", "-r", "@", "-T",
+                           'author.name() ++ "|" ++ author.email() ++ "|" ++ committer.name() ++ "|" ++ committer.email()'])
+            assert signature.strip() == "UI Test|ui@example.invalid|UI Test|ui@example.invalid", signature
             ui.send("u")
             ui.wait(lambda text: "Are you sure you want to undo last change?" in text, "undo confirmation")
             undo_start = len(ui.text())

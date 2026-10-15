@@ -1,6 +1,6 @@
 # fjjui and the embedded backend
 
-`fjjui` is the bundled fork of jjui 0.10.11, paired with fjj 0.2.2 and its
+`fjjui` is the bundled fork of jjui 0.10.11, paired with fjj 0.2.3 and its
 embedded jj 0.37.0. The UI is Go; repository operations and native Git/SSH are
 Rust. Linux and macOS support both x86_64 and ARM64.
 
@@ -88,7 +88,7 @@ Build fjj first, then install Go 1.27.2 or newer and build the UI beside it:
 ```sh
 cargo build --release --locked
 (cd vendor/jjui && CGO_ENABLED=0 go build -trimpath \
-  -ldflags '-s -w -X main.Version=fjjui-0.2.2-jjui-0.10.11' \
+  -ldflags '-s -w -X main.Version=fjjui-0.2.3-jjui-0.10.11' \
   -o ../../target/release/fjjui ./cmd/jjui)
 (cd vendor/jjui && go test ./...)
 python3 scripts/verify_jjui.py target/release/fjj target/release/fjjui

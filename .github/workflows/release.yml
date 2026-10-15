@@ -67,11 +67,13 @@ jobs:
           test "$host" = "$TARGET"
       - name: Test optimized binary and kernel privacy
         run: cargo test --release --locked --target "$TARGET" -- --nocapture
+      - name: Verify jj config discovery and commit identity
+        run: python3 scripts/verify_config.py "target/$TARGET/release/fjj"
       - name: Build fjjui
         working-directory: vendor/jjui
         env:
           CGO_ENABLED: '0'
-        run: go build -trimpath -ldflags '-s -w -X main.Version=fjjui-0.2.2-jjui-0.10.11' -o "../../target/$TARGET/release/fjjui" ./cmd/jjui
+        run: go build -trimpath -ldflags '-s -w -X main.Version=fjjui-0.2.3-jjui-0.10.11' -o "../../target/$TARGET/release/fjjui" ./cmd/jjui
       - name: Verify native HTTPS transport and certificate trust
         run: python3 scripts/verify_https_clone.py "target/$TARGET/release/fjj"
       - if: runner.os == 'Linux'

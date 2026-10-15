@@ -264,6 +264,8 @@ fn create_dir_all(path: &Path) -> std::io::Result<()> {
 #[derive(Clone, Default, Debug)]
 struct UnresolvedConfigEnv {
     config_dir: Option<PathBuf>,
+    // fjj: keep configurations used by jj before the XDG-only migration.
+    macos_legacy_config_dir: Option<PathBuf>,
     home_dir: Option<PathBuf>,
     jj_config: Option<String>,
 }
@@ -311,6 +313,18 @@ impl UnresolvedConfigEnv {
             paths.push(path);
         }
 
+        // Preserve older jj's precedence when both locations exist. Only read
+        // existing legacy paths; new configurations still use the XDG location.
+        // JJ_CONFIG above remains an explicit replacement for all defaults.
+        if let Some(dir) = self.macos_legacy_config_dir {
+            for relative in ["jj/config.toml", "jj/conf.d"] {
+                let path = ConfigPath::new(dir.join(relative));
+                if path.exists() {
+                    paths.push(path);
+                }
+            }
+        }
+
         paths
     }
 }
@@ -333,6 +347,15 @@ impl ConfigEnv {
         let config_dir = etcetera::choose_base_strategy()
             .ok()
             .map(|s| s.config_dir());
+        let macos_legacy_config_dir = if cfg!(target_os = "macos") {
+            // Apple calls Library/Application Support the data directory;
+            // its config directory is Library/Preferences, which jj never used.
+            etcetera::base_strategy::choose_native_strategy()
+                .ok()
+                .map(|s| s.data_dir())
+        } else {
+            None
+        };
 
         // Canonicalize home as we do canonicalize cwd in CliRunner. $HOME might
         // point to symlink.
@@ -342,6 +365,7 @@ impl ConfigEnv {
 
         let env = UnresolvedConfigEnv {
             config_dir,
+            macos_legacy_config_dir,
             home_dir: home_dir.clone(),
             jj_config: env::var("JJ_CONFIG").ok(),
         };
@@ -1712,6 +1736,7 @@ mod tests {
         let home_dir = env.home_dir.as_ref().map(|p| root.join(p));
         let env = UnresolvedConfigEnv {
             config_dir: env.config_dir.as_ref().map(|p| root.join(p)),
+            macos_legacy_config_dir: env.macos_legacy_config_dir.as_ref().map(|p| root.join(p)),
             home_dir: home_dir.clone(),
             jj_config: env.jj_config.as_ref().map(|p| {
                 join_paths(split_paths(p).map(|p| {
