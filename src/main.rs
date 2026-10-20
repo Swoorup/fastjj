@@ -1,7 +1,7 @@
 use std::ffi::OsString;
 use std::process::ExitCode;
 
-use fastjj::{editor, editor_process, privacy, prompt, request};
+use fastjj::{diff_process, editor, editor_process, privacy, prompt, request};
 use jj_cli::cli_util::CliRunner;
 use jj_cli::command_error::user_error;
 
@@ -11,15 +11,24 @@ fn run() -> Result<ExitCode, Box<dyn std::error::Error>> {
         editor_process::serve()?;
         return Ok(ExitCode::SUCCESS);
     }
+    if args == [OsString::from("--diff-service")] {
+        diff_process::serve()?;
+        return Ok(ExitCode::SUCCESS);
+    }
+    let (diff_service, diff_defaults) = diff_process::start()?;
     // The explicitly selected editor runs in a text-only service. Repository
     // code and its worker threads remain subject to the mandatory kernel policy.
     let _editor_service = editor_process::start()?;
-    // Before config loading, jj initialization, or thread creation. Never run
+    // Before repository config loading, jj command initialization, or thread creation. Never run
     // jj if the kernel cannot enforce the process-privacy guarantee.
     privacy::install().map_err(|e| format!("cannot enforce process privacy: {e}"))?;
     // SAFETY: jj and its workers have not been initialized yet.
     let _ssh_transport = unsafe { fastjj::ssh::install()? };
     jj_cli::description_util::register_builtin_text_editor(editor::edit);
+    jj_cli::diff_util::register_embedded_diff_renderer(
+        diff_process::is_delta,
+        diff_process::render,
+    );
     jj_lib::git::register_credential_prompt(prompt::read);
     jj_cli::ui::register_builtin_prompt(prompt::read, prompt::available);
 
@@ -66,6 +75,9 @@ fn run() -> Result<ExitCode, Box<dyn std::error::Error>> {
         if editor_process::enabled() {
             println!("Trusted external editor: enabled through a text-only helper");
         }
+        if diff_service.is_some() {
+            println!("Trusted Delta renderer: enabled through a patch-only helper");
+        }
         return Ok(ExitCode::SUCCESS);
     }
     if args.len() == 2 && args[0] == "--edit-file" {
@@ -74,6 +86,7 @@ fn run() -> Result<ExitCode, Box<dyn std::error::Error>> {
     }
 
     Ok(CliRunner::init()
+        .add_extra_config(diff_defaults)
         .name("fjj")
         .about("An embedded Jujutsu client. Use --request-stdin for in-memory JSON arguments; fjj embed explains the enforced process policy.")
         .version(concat!(env!("CARGO_PKG_VERSION"), " (jj 0.37.0)"))

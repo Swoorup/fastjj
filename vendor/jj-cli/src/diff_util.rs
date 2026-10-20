@@ -19,6 +19,7 @@ use std::iter;
 use std::ops::Range;
 use std::path::Path;
 use std::path::PathBuf;
+use std::sync::OnceLock;
 
 use bstr::BStr;
 use bstr::BString;
@@ -99,6 +100,47 @@ use crate::templater::TemplateRenderer;
 use crate::text_util;
 use crate::ui::Ui;
 
+type EmbeddedDiffRenderer = fn(&ExternalMergeTool, &[u8], usize, bool) -> io::Result<Vec<u8>>;
+type EmbeddedDiffSelector = fn(&ExternalMergeTool) -> bool;
+static EMBEDDED_DIFF_RENDERER: OnceLock<(EmbeddedDiffSelector, EmbeddedDiffRenderer)> =
+    OnceLock::new();
+static EMBEDDED_DIFF_PAGER: OnceLock<ExternalMergeTool> = OnceLock::new();
+
+/// Honor the usual `ui.pager = "delta", ui.diff-formatter = ":git"` setup
+/// when diff output is captured by a UI. Explicit --git still emits Git format.
+pub fn register_embedded_diff_pager(tool: ExternalMergeTool) {
+    EMBEDDED_DIFF_PAGER
+        .set(tool)
+        .expect("embedded diff pager already registered");
+}
+
+/// Supply a renderer which consumes an in-memory Git patch, keeping original
+/// paths in the input stream instead of external command arguments.
+pub fn register_embedded_diff_renderer(
+    accepts: EmbeddedDiffSelector,
+    render: EmbeddedDiffRenderer,
+) {
+    EMBEDDED_DIFF_RENDERER
+        .set((accepts, render))
+        .expect("embedded diff renderer already registered");
+}
+
+struct EmbeddedDiffInput(Vec<u8>);
+
+impl io::Write for EmbeddedDiffInput {
+    fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+        if bytes.len() > (64 * 1024 * 1024usize).saturating_sub(self.0.len()) {
+            return Err(io::Error::other("diff input exceeds 64 MiB"));
+        }
+        self.0.extend_from_slice(bytes);
+        Ok(bytes.len())
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        Ok(())
+    }
+}
+
 #[derive(clap::Args, Clone, Debug)]
 #[command(next_help_heading = "Diff Formatting Options")]
 #[command(group(clap::ArgGroup::new("short-format").args(&["summary", "stat", "types", "name_only"])))]
@@ -169,6 +211,7 @@ pub enum DiffFormat {
     Git(Box<UnifiedDiffOptions>),
     ColorWords(Box<ColorWordsDiffOptions>),
     Tool(Box<ExternalMergeTool>),
+    Embedded(Box<(ExternalMergeTool, UnifiedDiffOptions)>),
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -366,7 +409,7 @@ fn diff_formats_from_args(
             ensure_new(long_kind)?;
             let tool = diff_formatter_tool(settings, name)?
                 .unwrap_or_else(|| ExternalMergeTool::with_program(name));
-            long_format = Some(DiffFormat::Tool(Box::new(tool)));
+            long_format = Some(external_diff_format(settings, args, tool)?);
         }
     }
     Ok([short_format, long_format])
@@ -377,6 +420,11 @@ fn default_diff_format(
     args: &DiffFormatArgs,
 ) -> Result<DiffFormat, CommandError> {
     let tool_args: CommandNameAndArgs = settings.get("ui.diff-formatter")?;
+    if tool_args.as_str() == Some(":git")
+        && let Some(tool) = EMBEDDED_DIFF_PAGER.get()
+    {
+        return external_diff_format(settings, args, tool.clone());
+    }
     if let Some(name) = tool_args.as_str().and_then(|s| s.strip_prefix(':')) {
         Ok(BuiltinFormatKind::from_name(name)
             .map_err(|err| ConfigGetError::Type {
@@ -392,6 +440,23 @@ fn default_diff_format(
             None
         }
         .unwrap_or_else(|| ExternalMergeTool::with_diff_args(&tool_args));
+        external_diff_format(settings, args, tool)
+    }
+}
+
+fn external_diff_format(
+    settings: &UserSettings,
+    args: &DiffFormatArgs,
+    tool: ExternalMergeTool,
+) -> Result<DiffFormat, CommandError> {
+    if EMBEDDED_DIFF_RENDERER
+        .get()
+        .is_some_and(|(accepts, _)| accepts(&tool))
+    {
+        let mut options = UnifiedDiffOptions::from_settings(settings)?;
+        options.merge_args(args);
+        Ok(DiffFormat::Embedded(Box::new((tool, options))))
+    } else {
         Ok(DiffFormat::Tool(Box::new(tool)))
     }
 }
@@ -524,6 +589,23 @@ impl<'a> DiffRenderer<'a> {
                     )
                     .await?;
                 }
+                DiffFormat::Embedded(spec) => {
+                    let (tool, options) = spec.as_ref();
+                    let (_, render) = EMBEDDED_DIFF_RENDERER.get().expect("registered renderer");
+                    let mut input = EmbeddedDiffInput(Vec::new());
+                    let mut plain = crate::formatter::PlainTextFormatter::new(&mut input);
+                    show_git_diff(
+                        &mut plain,
+                        store,
+                        diff_stream(),
+                        conflict_labels,
+                        options,
+                        self.conflict_marker_style,
+                    )
+                    .await?;
+                    let output = render(tool, &input.0, width, ui.color())?;
+                    formatter.raw()?.write_all(&output)?;
+                }
                 DiffFormat::Tool(tool) => {
                     match tool.diff_invocation_mode {
                         DiffToolMode::FileByFile => {
@@ -563,8 +645,10 @@ impl<'a> DiffRenderer<'a> {
 
     fn show_diff_commit_descriptions(
         &self,
+        ui: &Ui,
         formatter: &mut dyn Formatter,
         descriptions: Diff<&Merge<&str>>,
+        width: usize,
     ) -> Result<(), DiffRenderError> {
         if !descriptions.is_changed() {
             return Ok(());
@@ -606,6 +690,21 @@ impl<'a> DiffRenderer<'a> {
                 DiffFormat::Tool(_) => {
                     // TODO: materialize commit description as file?
                 }
+                DiffFormat::Embedded(spec) => {
+                    let (tool, options) = spec.as_ref();
+                    let (_, render) = EMBEDDED_DIFF_RENDERER.get().expect("registered renderer");
+                    let mut input = EmbeddedDiffInput(Vec::new());
+                    show_git_diff_texts(
+                        &mut crate::formatter::PlainTextFormatter::new(&mut input),
+                        Diff::new(DUMMY_PATH, DUMMY_PATH),
+                        descriptions,
+                        options,
+                        &materialize_options,
+                    )?;
+                    formatter
+                        .raw()?
+                        .write_all(&render(tool, &input.0, width, ui.color())?)?;
+                }
             }
         }
         Ok(())
@@ -640,8 +739,10 @@ impl<'a> DiffRenderer<'a> {
         let to_tree = to_commit.tree();
         let copy_records = CopyRecords::default(); // TODO
         self.show_diff_commit_descriptions(
+            ui,
             *formatter,
             Diff::new(&from_description, &to_description),
+            width,
         )?;
         self.show_diff_trees(
             ui,

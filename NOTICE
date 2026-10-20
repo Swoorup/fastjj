@@ -4,7 +4,7 @@ under Apache-2.0. Upstream: https://github.com/jj-vcs/jj/tree/v0.37.0
 
 The vendored crates come from the published crates.io packages, retaining
 upstream copyright and license notices. The CLI adds in-memory arguments and
-configuration, native text editing and credential callbacks, and removes
+configuration, native text editing, credential and patch-rendering callbacks, and removes
 standalone binary/test declarations from its manifest. jj-lib replaces the Git
 subprocess transport with native libgit2 fetch, push leases, remote discovery,
 refspec exclusions and pruning. Repository storage remains the jj 0.37 format.
@@ -16,5 +16,6 @@ MIT. Upstream: https://github.com/idursun/jjui/tree/v0.10.11
 (commit cd1da156b1d4d4cae6bedd7fd1f1f23ca42f8f0e).
 The license is retained in vendor/jjui/LICENSE and release licenses/jjui-MIT.txt.
 The fork replaces backend argv and askpass subprocesses with inherited private
-request/credential descriptors, uses the native editor, and blocks shell and
-Lua process entry points. The UI retains the upstream module path for imports.
+request/credential descriptors, uses embedded editor/renderer services, fixes
+preview refresh/resize/error handling, and blocks shell and Lua process entry
+points. The UI retains the upstream module path for imports.

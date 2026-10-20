@@ -120,13 +120,13 @@ func (m *Model) handleSplitIntent(intent intents.Intent) (tea.Cmd, bool) {
 		if shown {
 			return tea.Batch(cmd, m.selectionChanged()), true
 		}
-		return cmd, true
+		return tea.Batch(cmd, func() tea.Msg { return preview.ResizeMsg{} }), true
 	case intents.PreviewExpand:
 		m.splitContainer.Resize(config.Current.Preview.WidthIncrementPercentage)
-		return nil, true
+		return func() tea.Msg { return preview.ResizeMsg{} }, true
 	case intents.PreviewShrink:
 		m.splitContainer.Resize(-config.Current.Preview.WidthIncrementPercentage)
-		return nil, true
+		return func() tea.Msg { return preview.ResizeMsg{} }, true
 	case intents.PreviewShow:
 		cmd, _ := m.splitContainer.ShowContent(previewContentID)
 		m.splitContainer.FocusPrimary()

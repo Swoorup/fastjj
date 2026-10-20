@@ -4,6 +4,7 @@ A Rust client that embeds Jujutsu, Git, and SSH in one process. Repository work
 runs in-process with worker threads; a mandatory kernel policy prevents the
 repository backend from launching external programs. An explicitly selected
 text editor runs through a separate helper with a generic temporary filename.
+Delta can format diffs through a helper that receives patches over pipes.
 
 fjj embeds **jj 0.37.0**, with an in-process libgit2 implementation of its Git
 transport. It includes **fjjui**, a fork of jjui 0.10.11 connected to the embedded
@@ -122,7 +123,7 @@ builds and tests optimized binaries on native runners for:
 Pushes to `main` and manual workflow runs upload downloadable build artifacts.
 Changes confined to Nix packaging and the CI workflow skip rebuilding unchanged
 release binaries; source and installed-package CI checks still run.
-Version tags such as `v0.2.4` additionally publish all four archives to
+Version tags such as `v0.2.5` additionally publish all four archives to
 [GitHub Releases](https://github.com/Swoorup/fastjj/releases), after every target
 passes its optimized tests. The tag must match the version in `Cargo.toml`.
 Published assets are never overwritten: a repeated tag build must match the
@@ -136,9 +137,9 @@ in the same directory on your PATH and run `fjj embed`.
 
 ```sh
 # Linux
-sha256sum --check fjj-v0.2.4-x86_64-unknown-linux-gnu.tar.gz.sha256
+sha256sum --check fjj-v0.2.5-x86_64-unknown-linux-gnu.tar.gz.sha256
 # macOS (choose the matching architecture's archive)
-shasum -a 256 --check fjj-v0.2.4-aarch64-apple-darwin.tar.gz.sha256
+shasum -a 256 --check fjj-v0.2.5-aarch64-apple-darwin.tar.gz.sha256
 ```
 
 Linux binaries are built on Ubuntu 24.04 and need a compatible glibc installation.
@@ -218,6 +219,55 @@ and error remain ordinary jj output, not JSON. Parsing errors do not echo reques
 contents. The stdin request interface consumes stdin; commands that need stdin again should use
 their file or message options instead. The built-in text editor reads the
 controlling terminal directly and therefore also works with embedded requests.
+
+## Diffs, Delta, and previews
+
+Built-in diff formats and the interactive diff editor work in-process. To use
+[Delta](https://github.com/dandavison/delta), install it separately and keep your
+usual **user jj configuration**, for example:
+
+```toml
+[ui]
+pager = "delta"
+diff-formatter = ":git"
+```
+
+This also enables Delta in captured output, including fjjui previews. The
+built-in pager handles terminal scrolling; Delta's own pager is disabled.
+Alternatively, configure `ui.diff-formatter = ["delta", "--side-by-side"]`.
+Named Delta entries under `merge-tools` work too. An absolute executable path
+ending in `delta` is supported.
+
+```sh
+fjj diff
+fjj diff --tool delta
+fjj difftool             # alias for diff; respects your formatter
+fjj diff --git           # explicit Git format
+```
+
+In fjjui, **d** opens the diff viewer and **p** toggles the preview. File details
+have the same diff/preview actions. Ctrl+R refreshes working-copy changes; pane
+and terminal resizing regenerate width-sensitive output. Renderer errors appear
+in the preview and can be retried after fixing the configuration.
+Custom preview commands using explicit `--git` select Git output; omit that flag
+to use Delta. `--color=never` produces a plain Git patch without ANSI escapes.
+Summary, stat, types, and name-only formats keep their built-in behavior.
+
+Delta receives Git patches on stdin, including filenames needed for syntax
+highlighting. Repository paths, filenames, and contents are never appended to
+its argv. Only user-level jj configuration authorizes Delta's program/options;
+repository or command-line configuration cannot add executable commands or new
+argument vectors. Configure additional options in your user config first.
+Global Delta settings in `~/.gitconfig` remain available. The renderer runs in a
+private temporary directory, so repository-local Git configuration is not read;
+use absolute paths for explicit configuration-file options. Structured user
+commands with `command` and `env` also preserve their configured environment.
+
+Delta is a trusted external renderer, like an explicitly selected editor.
+Its user-supplied options and any subprocesses it starts are outside the
+backend's process restriction. The supported Delta workflow is tested with its
+pager disabled. Delta is read-only: `diffedit` and merge editing continue to use
+the built-in interactive tools.
 
 ## Commit-message editors
 
@@ -316,7 +366,8 @@ key. Git credential helpers for HTTPS still cannot execute; use native terminal
 credentials instead.
 
 Commands whose purpose is running other programs (`util exec`, `fix`, and `util gc`)
-return an explicit process-policy error. External diff/merge tools, signing
+return an explicit process-policy error. External diff/merge tools other than the
+authorized Delta renderer, signing
 programs, hooks, and credential helpers also cannot run.
 Use the selected text editor or `describe -m` / `commit -m`, `config set`, and
 built-in diff/merge editors.
@@ -358,6 +409,11 @@ and fjjui terminal handoff on all four platforms. It observes live process argv
 on macOS and Linux and audits the full process tree on Linux. SSH checks also run
 with the editor service enabled to verify that credentials and repository paths
 stay out of arguments while the backend's kernel restrictions remain effective.
+
+`scripts/verify_diff.py` exercises real Delta, named diff tools, filename
+filtering, built-in output formats, jjui diffs/previews, refresh and resize,
+renderer failures, user-config authorization, and live process arguments.
+CI downloads a checksum-pinned Delta test executable for each native platform.
 
 CI and optimized release builds run `scripts/verify_ssh.py` against disposable
 SSH servers and keys. It performs real clone/fetch/push with custom Ed25519 and

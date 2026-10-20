@@ -1,6 +1,8 @@
 package preview
 
 import (
+	"errors"
+	"slices"
 	"testing"
 
 	"github.com/idursun/jjui/internal/config"
@@ -14,6 +16,96 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
+
+type previewRunner struct {
+	*test.CommandRunner
+	calls int
+	args  []string
+	env   []string
+	text  string
+	err   error
+}
+
+func (r *previewRunner) RunCommandImmediateWithEnv(args, env []string) ([]byte, error) {
+	r.calls++
+	r.args, r.env = slices.Clone(args), slices.Clone(env)
+	return []byte(r.text), r.err
+}
+
+func TestRefreshUpdatesSameRevisionAndRetainsScrollForUnchangedContent(t *testing.T) {
+	runner := &previewRunner{CommandRunner: test.NewTestCommandRunner(t), text: "one\ntwo\nthree\nfour"}
+	ctx := test.NewTestContext(runner)
+	ctx.SetStateProvider(selectionStateProvider{snapshot: common.SelectionSnapshot{
+		Highlighted: common.SelectedRevision{ChangeId: "change", CommitId: "commit"},
+	}})
+	model := New(ctx)
+	model.ViewRect(render.NewDisplayContext(), layout.NewBox(layout.Rect(0, 0, 80, 2)))
+	test.SimulateModel(model, model.Update(common.SelectionChangedMsg{}))
+	model.Scroll(1)
+	test.SimulateModel(model, model.Update(common.RefreshMsg{}))
+	assert.Equal(t, 2, runner.calls)
+	assert.Equal(t, 1, model.YOffset())
+	runner.text = "changed in the working copy"
+	// A selection notification may supersede a refresh during its debounce.
+	// It must not reuse the old output for the unchanged revision identifier.
+	refresh := model.Update(common.RefreshMsg{})
+	selection := model.Update(common.SelectionChangedMsg{})
+	test.SimulateModel(model, refresh)
+	test.SimulateModel(model, selection)
+	assert.Equal(t, runner.text, model.content)
+	assert.Equal(t, 3, runner.calls)
+}
+
+func TestResizeUsesNewPaneGeometryAndDoesNotReuseCachedOutput(t *testing.T) {
+	runner := &previewRunner{CommandRunner: test.NewTestCommandRunner(t), text: "diff"}
+	ctx := test.NewTestContext(runner)
+	ctx.SetStateProvider(selectionStateProvider{snapshot: common.SelectionSnapshot{
+		Highlighted: common.SelectedRevision{ChangeId: "change", CommitId: "commit"},
+	}})
+	model := New(ctx)
+	model.ViewRect(render.NewDisplayContext(), layout.NewBox(layout.Rect(0, 0, 80, 4)))
+	test.SimulateModel(model, model.Update(common.SelectionChangedMsg{}))
+	cmd := model.Update(ResizeMsg{})
+	model.ViewRect(render.NewDisplayContext(), layout.NewBox(layout.Rect(0, 0, 42, 6)))
+	test.SimulateModel(model, cmd)
+	assert.Equal(t, 2, runner.calls)
+	assert.Contains(t, runner.env, "COLUMNS=42")
+	assert.Contains(t, runner.env, "DFT_WIDTH=42")
+	assert.Contains(t, runner.env, "LINES=6")
+}
+
+func TestPreviewErrorsAreVisibleAndRetried(t *testing.T) {
+	runner := &previewRunner{CommandRunner: test.NewTestCommandRunner(t), err: errors.New("Delta failed")}
+	ctx := test.NewTestContext(runner)
+	ctx.SetStateProvider(selectionStateProvider{snapshot: common.SelectionSnapshot{
+		Highlighted: common.SelectedRevision{ChangeId: "change", CommitId: "commit"},
+	}})
+	model := New(ctx)
+	test.SimulateModel(model, model.Update(common.SelectionChangedMsg{}))
+	assert.Contains(t, model.content, "Preview failed:\nDelta failed")
+	runner.err, runner.text = nil, "recovered diff"
+	test.SimulateModel(model, model.Update(common.SelectionChangedMsg{}))
+	assert.Equal(t, "recovered diff", model.content)
+	assert.Equal(t, 2, runner.calls)
+}
+
+func TestLatePreviewCannotReplaceNewSelection(t *testing.T) {
+	runner := &previewRunner{CommandRunner: test.NewTestCommandRunner(t), text: "old"}
+	ctx := test.NewTestContext(runner)
+	old := common.SelectedRevision{ChangeId: "old", CommitId: "old"}
+	newer := common.SelectedRevision{ChangeId: "new", CommitId: "new"}
+	ctx.SetStateProvider(selectionStateProvider{snapshot: common.SelectionSnapshot{Highlighted: old}})
+	model := New(ctx)
+	first := model.Update(common.SelectionChangedMsg{})
+	oldCommand := model.Update(first())
+	oldResult := oldCommand()
+	ctx.SetStateProvider(selectionStateProvider{snapshot: common.SelectionSnapshot{Highlighted: newer}})
+	runner.text = "new"
+	test.SimulateModel(model, model.Update(common.SelectionChangedMsg{}))
+	model.Update(oldResult)
+	assert.Equal(t, "new", model.content)
+	assert.Equal(t, newer, model.contentItem)
+}
 
 type selectionStateProvider struct{ snapshot common.SelectionSnapshot }
 

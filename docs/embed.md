@@ -3,7 +3,7 @@
 ## Guarantee
 
 The repository backend installs a mandatory kernel process policy **before** jj
-initialization, configuration loading, or worker-thread creation. It refuses to
+command initialization, repository/workspace configuration loading, or worker-thread creation. It refuses to
 run if any step fails. The kernel prevents the repository backend, all its existing threads, and
 all future threads from creating child processes or executing other programs.
 Repository reads, writes, diffing, history operations,
@@ -13,6 +13,9 @@ This includes subprocess attempts hidden in dependencies or configuration:
 external diff/merge tools, shell aliases, Git credential helpers, filters, signing
 backends, pagers, Watchman, and Git/SSH wrappers cannot evade the filter. Requests
 to run an external-only feature fail; no fallback weakens the backend policy.
+The startup code first reads trusted user-level jj settings to authorize Delta,
+and starts any selected editor/renderer helpers before installing that policy.
+This bootstrap does not evaluate repository configuration or execute jj commands.
 
 In `--request-stdin` mode, paths, URLs, messages, and other arguments enter through
 stdin and are handed to the embedded CLI in memory. The OS's argv view contains
@@ -44,6 +47,37 @@ they generate or arguments explicitly supplied in `EDITOR`. This exception does
 not permit the backend to invoke Git, SSH, pagers, shells, or credential helpers.
 Read-only commands with an editor selected may start the fixed-argument helper,
 but the editor itself starts only when text editing is requested.
+
+## Trusted Delta renderer
+
+User-level `ui.pager`, `ui.diff-formatter`, or `merge-tools` settings can authorize
+Delta. With no authorized Delta configuration, no diff helper is created.
+Otherwise startup creates `fjj --diff-service`. It independently reads the user
+configuration and accepts only authorized Delta programs and argument vectors.
+Repository/CLI tool definitions cannot add commands, flags, or acceptable exit
+codes to this allowlist. Structured command environments come only from user
+configuration; the helper still enforces its neutral cwd and `PWD`.
+
+The guarded backend generates Git patches in memory and sends bounded frames
+over anonymous pipes. The helper receives the selected tool, numeric width,
+color choice, and patch contents; it has no repository/cwd request field.
+Metadata is limited to 64 KiB and patch input/output to 64 MiB. Malformed,
+truncated, oversized, and unauthorized requests fail.
+
+Delta receives the patch on stdin in a mode-0700 system temporary directory.
+Its mode-0600 input file has a generic name and never appears in argv. The
+original filenames stay in the patch, preserving syntax highlighting and diff
+headers. `$left`/`$right` arguments are replaced by this stdin workflow;
+`$width` is numeric. The helper supplies `--paging=never`, captures stdout/stderr,
+and closes jjui's request/credential descriptors across exec. Delta runs in a
+separate session without a controlling terminal so theme queries cannot consume
+UI input. Temporary files are removed after rendering.
+Color-disabled requests return the original plain Git patch.
+
+Delta and its user configuration are trusted. The backend's kernel policy does
+not constrain the external renderer's own behavior or user-authored argument
+strings. Native Git/SSH still run inside the guarded backend. Tests exercise
+real Delta and assert that no additional pager or Git subprocess appears.
 
 ## jjui boundary
 

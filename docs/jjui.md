@@ -1,6 +1,6 @@
 # fjjui and the embedded backend
 
-`fjjui` is the bundled fork of jjui 0.10.11, paired with fjj 0.2.4 and its
+`fjjui` is the bundled fork of jjui 0.10.11, paired with fjj 0.2.5 and its
 embedded jj 0.37.0. The UI is Go; repository operations and native Git/SSH are
 Rust. Linux and macOS support both x86_64 and ARM64.
 
@@ -42,8 +42,15 @@ operation history, undo/redo, and history editing use the private backend.
 - `:` runs a jj command with terminal access and private arguments. Commands
   needing the built-in diff or merge editor can take over the terminal normally.
 - `fjjui --config` uses the same selected text editor.
+- `d` opens the diff viewer; `p` toggles revision/file previews. User jj Delta
+  settings (`ui.pager = "delta"` with `ui.diff-formatter = ":git"`, or a Delta
+  diff formatter) apply to both. Ctrl+R refreshes changed content, resizing
+  regenerates width-sensitive output, and preview errors are displayed.
+  Configure Delta in user jj settings and install it separately; see
+  [diff configuration](../README.md#diffs-delta-and-previews).
 
-The backend's restrictions still apply: external diff/merge tools, signing commands,
+The backend's restrictions still apply: external diff/merge tools other than
+the authorized Delta renderer, signing commands,
 credential helpers, `fix`, and commands that require external programs cannot
 execute. Shell actions (`$`, Lua `exec_shell`, `os.execute`, `io.popen`) return a
 privacy error. Use jj actions or Lua's jj API for repository automation. Clipboard
@@ -78,7 +85,9 @@ frames fail rather than falling back to an external helper.
 The startup probe uses the constant `fjj --interface-version` command. fjj
 installs its kernel subprocess prohibition before processing any request. An
 environment-selected text editor uses the separate helper started before that
-policy; Git, SSH, and diff/merge tools inside the backend cannot create another process. The UI
+policy. An authorized Delta renderer uses `fjj --diff-service`, carrying patch
+contents through pipes and never appending original filenames to Delta's argv.
+Git, SSH, and diff/merge editing inside the backend cannot create another process. The UI
 must be able to start these backend children; its fixed-argument command factory,
 blocked shell entry points, and audited clipboard calls enforce the UI boundary.
 This is a separate boundary from the backend's kernel policy.
@@ -97,7 +106,7 @@ Build fjj first, then install Go 1.27.2 or newer and build the UI beside it:
 ```sh
 cargo build --release --locked
 (cd vendor/jjui && CGO_ENABLED=0 go build -trimpath \
-  -ldflags '-s -w -X main.Version=fjjui-0.2.4-jjui-0.10.11' \
+  -ldflags '-s -w -X main.Version=fjjui-0.2.5-jjui-0.10.11' \
   -o ../../target/release/fjjui ./cmd/jjui)
 (cd vendor/jjui && go test ./...)
 python3 scripts/verify_jjui.py target/release/fjj target/release/fjjui

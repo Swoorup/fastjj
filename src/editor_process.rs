@@ -112,15 +112,7 @@ pub fn start() -> io::Result<Option<Service>> {
     // jjui's request and credential descriptors must stay in the backend only.
     // Mark them before std::process allocates its own pipes. CLOEXEC leaves them
     // available to this backend, but closes them in the editor service.
-    for fd in [3, 4] {
-        // SAFETY: fcntl only inspects/sets flags on these borrowed descriptors.
-        unsafe {
-            let flags = libc::fcntl(fd, libc::F_GETFD);
-            if flags >= 0 && libc::fcntl(fd, libc::F_SETFD, flags | libc::FD_CLOEXEC) < 0 {
-                return Err(io::Error::last_os_error());
-            }
-        }
-    }
+    protect_ui_descriptors()?;
     let mut child = command.spawn()?;
     let input = child.stdin.take();
     let output = child.stdout.take().expect("piped service stdout");
@@ -133,6 +125,19 @@ pub fn start() -> io::Result<Option<Service>> {
         .set(connection.clone())
         .map_err(|_| io::Error::other("editor service already initialized"))?;
     Ok(Some(Service(connection)))
+}
+
+pub(crate) fn protect_ui_descriptors() -> io::Result<()> {
+    for fd in [3, 4] {
+        // SAFETY: fcntl only inspects/sets flags on these borrowed descriptors.
+        unsafe {
+            let flags = libc::fcntl(fd, libc::F_GETFD);
+            if flags >= 0 && libc::fcntl(fd, libc::F_SETFD, flags | libc::FD_CLOEXEC) < 0 {
+                return Err(io::Error::last_os_error());
+            }
+        }
+    }
+    Ok(())
 }
 
 pub fn enabled() -> bool {

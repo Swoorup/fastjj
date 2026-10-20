@@ -34,6 +34,7 @@ import (
 	"github.com/idursun/jjui/internal/ui/operations/target_picker"
 	"github.com/idursun/jjui/internal/ui/oplog"
 	"github.com/idursun/jjui/internal/ui/password"
+	"github.com/idursun/jjui/internal/ui/preview"
 	"github.com/idursun/jjui/internal/ui/redo"
 	"github.com/idursun/jjui/internal/ui/render"
 	"github.com/idursun/jjui/internal/ui/revisions"
@@ -259,7 +260,7 @@ func (m *Model) Update(msg tea.Msg) (cmd tea.Cmd) {
 		return tea.Batch(tea.RequestBackgroundColor, scheduleColorSchemePoll())
 	case tea.MouseReleaseMsg, tea.MouseMotionMsg:
 		if m.handleSplitMouseMsg(msg) {
-			return nil
+			return func() tea.Msg { return preview.ResizeMsg{} }
 		}
 	case tea.MouseClickMsg, tea.MouseWheelMsg:
 		if m.displayContext != nil {

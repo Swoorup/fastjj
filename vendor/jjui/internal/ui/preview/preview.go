@@ -1,6 +1,7 @@
 package preview
 
 import (
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -25,6 +26,10 @@ type Model struct {
 	content     string
 	contentItem common.SelectedItem
 	context     *context.MainContext
+	generation  uint64
+	contentArgs []string
+	contentEnv  []string
+	dirty       bool
 }
 
 const (
@@ -39,6 +44,19 @@ type previewMsg struct {
 type updatePreviewContentMsg struct {
 	contentItem common.SelectedItem
 	content     string
+	generation  uint64
+	args        []string
+	env         []string
+	err         error
+}
+
+// ResizeMsg requests rendering after the next layout pass has sized the pane.
+type ResizeMsg struct{}
+
+type refreshPreviewMsg struct {
+	item       common.SelectedItem
+	force      bool
+	generation uint64
 }
 
 type ScrollMsg struct {
@@ -91,10 +109,12 @@ func (m *Model) Init() tea.Cmd {
 
 func (m *Model) OnShow() tea.Cmd {
 	m.reset()
+	m.generation++
+	m.contentItem = nil
 	return nil
 }
 
-func (m *Model) OnHide() {}
+func (m *Model) OnHide() { m.generation++ }
 
 func (m *Model) SetFocused(bool) {}
 
@@ -153,21 +173,51 @@ func (m *Model) Update(msg tea.Msg) tea.Cmd {
 			m.Scroll(msg.Delta)
 		}
 	case intents.PreviewShow:
+		m.generation++
+		m.contentItem = nil
 		m.SetContent(msg.Content)
 		return nil
 	case common.SelectionChangedMsg:
-		return m.refreshPreviewForItem(m.context.Selection().Highlighted)
+		return m.refreshPreviewForItem(m.context.Selection().Highlighted, false)
 	case common.RefreshMsg:
-		return m.refreshPreviewForItem(m.context.Selection().Highlighted)
+		return m.refreshPreviewForItem(m.context.Selection().Highlighted, true)
+	case tea.WindowSizeMsg, ResizeMsg:
+		return m.refreshPreviewForItem(m.context.Selection().Highlighted, false)
+	case refreshPreviewMsg:
+		if msg.generation != m.generation {
+			return nil
+		}
+		return m.runPreview(msg)
 	case updatePreviewContentMsg:
+		if msg.generation != m.generation {
+			return nil
+		}
+		if msg.err != nil {
+			m.contentItem = nil // allow retry after configuration/tool errors
+			m.SetContent("Preview failed:\n" + msg.err.Error())
+			return nil
+		}
+		sameItem := m.contentItem != nil && m.contentItem.Equal(msg.contentItem)
 		m.contentItem = msg.contentItem
-		m.SetContent(msg.content)
+		m.contentArgs, m.contentEnv = msg.args, msg.env
+		m.dirty = false
+		content := normalizeContent(msg.content)
+		if content != m.content || !sameItem {
+			m.SetContent(content)
+		}
 		return nil
 	}
 	return nil
 }
 
 func (m *Model) SetContent(content string) {
+	content = normalizeContent(content)
+	m.reset()
+	m.content = content
+	m.view.SetContent(content)
+}
+
+func normalizeContent(content string) string {
 	content = strings.ReplaceAll(content, "\r", "")
 	if strings.ContainsRune(content, '\t') {
 		lines := strings.Split(content, "\n")
@@ -176,9 +226,7 @@ func (m *Model) SetContent(content string) {
 		}
 		content = strings.Join(lines, "\n")
 	}
-	m.reset()
-	m.content = content
-	m.view.SetContent(content)
+	return content
 }
 
 func (m *Model) ViewRect(dl *render.DisplayContext, box layout.Box) {
@@ -197,57 +245,77 @@ func (m *Model) reset() {
 	m.view.SetXOffset(0)
 }
 
-func (m *Model) refreshPreviewForItem(item common.SelectedItem) tea.Cmd {
-	return common.Debounce(debounceId, debounceDuration, func() tea.Msg {
-		var args []string
-		previewWidth := strconv.Itoa(m.view.Width())
-		switch sel := item.(type) {
-		case common.SelectedFile:
-			args = jj.TemplatedArgs(config.Current.Preview.FileCommand, map[string]string{
-				jj.RevsetPlaceholder:       m.context.CurrentRevset,
-				jj.ChangeIdPlaceholder:     sel.ChangeId,
-				jj.CommitIdPlaceholder:     sel.CommitId,
-				jj.FilePlaceholder:         sel.File.Path(),
-				jj.PreviewWidthPlaceholder: previewWidth,
-			})
-		case common.SelectedRevision:
-			args = jj.TemplatedArgs(config.Current.Preview.RevisionCommand, map[string]string{
-				jj.RevsetPlaceholder:       m.context.CurrentRevset,
-				jj.ChangeIdPlaceholder:     sel.ChangeId,
-				jj.CommitIdPlaceholder:     sel.CommitId,
-				jj.PreviewWidthPlaceholder: previewWidth,
-			})
-		case common.SelectedCommit:
-			args = jj.TemplatedArgs(config.Current.Preview.EvologCommand, map[string]string{
-				jj.RevsetPlaceholder:       m.context.CurrentRevset,
-				jj.CommitIdPlaceholder:     sel.CommitId,
-				jj.PreviewWidthPlaceholder: previewWidth,
-			})
-		case common.SelectedOperation:
-			args = jj.TemplatedArgs(config.Current.Preview.OplogCommand, map[string]string{
-				jj.RevsetPlaceholder:       m.context.CurrentRevset,
-				jj.OperationIdPlaceholder:  sel.OperationId,
-				jj.PreviewWidthPlaceholder: previewWidth,
-			})
-		}
+func (m *Model) refreshPreviewForItem(item common.SelectedItem, force bool) tea.Cmd {
+	m.generation++
+	m.dirty = m.dirty || force
+	request := refreshPreviewMsg{item: item, force: force, generation: m.generation}
+	// Return a message first: read pane geometry and configuration on the UI
+	// thread, after layout, rather than racing ViewRect from a command goroutine.
+	return common.Debounce(debounceId, debounceDuration, func() tea.Msg { return request })
+}
 
-		env := []string{
-			// The preview subprocess does not run in a pane-sized PTY, so let
-			// width-sensitive tools like `jj diff` see the preview size via the
-			// conventional terminal size environment variables.
-			"DFT_WIDTH=" + strconv.Itoa(m.view.Width()), // difftastic
-			"COLUMNS=" + strconv.Itoa(m.view.Width()),
-			"LINES=" + strconv.Itoa(m.view.Height()),
-		}
-		if m.contentItem != nil && m.contentItem.Equal(item) {
-			return nil
-		}
-		output, _ := m.context.RunCommandImmediateWithEnv(args, env)
+func (m *Model) runPreview(request refreshPreviewMsg) tea.Cmd {
+	item := request.item
+	var args []string
+	previewWidth := strconv.Itoa(m.view.Width())
+	switch sel := item.(type) {
+	case common.SelectedFile:
+		args = jj.TemplatedArgs(config.Current.Preview.FileCommand, map[string]string{
+			jj.RevsetPlaceholder:       m.context.CurrentRevset,
+			jj.ChangeIdPlaceholder:     sel.ChangeId,
+			jj.CommitIdPlaceholder:     sel.CommitId,
+			jj.FilePlaceholder:         sel.File.Path(),
+			jj.PreviewWidthPlaceholder: previewWidth,
+		})
+	case common.SelectedRevision:
+		args = jj.TemplatedArgs(config.Current.Preview.RevisionCommand, map[string]string{
+			jj.RevsetPlaceholder:       m.context.CurrentRevset,
+			jj.ChangeIdPlaceholder:     sel.ChangeId,
+			jj.CommitIdPlaceholder:     sel.CommitId,
+			jj.PreviewWidthPlaceholder: previewWidth,
+		})
+	case common.SelectedCommit:
+		args = jj.TemplatedArgs(config.Current.Preview.EvologCommand, map[string]string{
+			jj.RevsetPlaceholder:       m.context.CurrentRevset,
+			jj.CommitIdPlaceholder:     sel.CommitId,
+			jj.PreviewWidthPlaceholder: previewWidth,
+		})
+	case common.SelectedOperation:
+		args = jj.TemplatedArgs(config.Current.Preview.OplogCommand, map[string]string{
+			jj.RevsetPlaceholder:       m.context.CurrentRevset,
+			jj.OperationIdPlaceholder:  sel.OperationId,
+			jj.PreviewWidthPlaceholder: previewWidth,
+		})
+	default:
+		m.contentItem = nil
+		m.SetContent("")
+		return nil
+	}
+
+	env := []string{
+		// The preview subprocess does not run in a pane-sized PTY, so let
+		// width-sensitive tools like `jj diff` see the preview size via the
+		// conventional terminal size environment variables.
+		"DFT_WIDTH=" + strconv.Itoa(m.view.Width()), // difftastic
+		"COLUMNS=" + strconv.Itoa(m.view.Width()),
+		"LINES=" + strconv.Itoa(m.view.Height()),
+	}
+	if !m.dirty && !request.force && m.contentItem != nil && m.contentItem.Equal(item) &&
+		slices.Equal(args, m.contentArgs) && slices.Equal(env, m.contentEnv) {
+		return nil
+	}
+	runner := m.context.CommandRunner
+	return func() tea.Msg {
+		output, err := runner.RunCommandImmediateWithEnv(args, env)
 		return updatePreviewContentMsg{
 			contentItem: item,
 			content:     string(output),
+			generation:  request.generation,
+			args:        args,
+			env:         env,
+			err:         err,
 		}
-	})
+	}
 }
 
 func New(context *context.MainContext) *Model {

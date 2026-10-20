@@ -20,10 +20,11 @@ import time
 
 
 class UI:
-    def __init__(self, binary, cwd, environment, root, backend_name, editor_argv=None):
+    def __init__(self, binary, cwd, environment, root, backend_name, editor_argv=None, delta_args=None):
         self.trace = root / "jjui-process.trace"
         self.backend_name = backend_name
         self.editor_argv = editor_argv
+        self.delta_args = delta_args
         argv = [str(binary)]
         if sys.platform.startswith("linux"):
             assert shutil.which("strace"), "strace is required"
@@ -132,6 +133,13 @@ class UI:
                     expected.append(json.dumps(["fjj", "--editor-service"]))
                     if self.editor_argv:
                         expected.append(json.dumps(self.editor_argv))
+                if self.delta_args is not None:
+                    expected.append(json.dumps(["fjj", "--diff-service"]))
+                    delta = re.search(r'\["delta", "--paging=never", "--width=([0-9]+)"', line)
+                    if delta:
+                        width = int(delta.group(1))
+                        assert 1 <= width <= 10000, line
+                        expected.append(json.dumps(["delta", "--paging=never", f"--width={width}", *self.delta_args]))
                 assert any(argv in line for argv in expected), line
 
 
