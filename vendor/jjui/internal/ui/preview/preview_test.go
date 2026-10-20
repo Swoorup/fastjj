@@ -74,6 +74,24 @@ func TestResizeUsesNewPaneGeometryAndDoesNotReuseCachedOutput(t *testing.T) {
 	assert.Contains(t, runner.env, "LINES=6")
 }
 
+func TestGraphReloadRefreshesPreviewWithoutSelectionNotification(t *testing.T) {
+	runner := &previewRunner{CommandRunner: test.NewTestCommandRunner(t), text: "before reload"}
+	ctx := test.NewTestContext(runner)
+	ctx.SetStateProvider(selectionStateProvider{snapshot: common.SelectionSnapshot{
+		Highlighted: common.SelectedRevision{ChangeId: "change", CommitId: "commit"},
+	}})
+	model := New(ctx)
+	test.SimulateModel(model, model.Update(common.SelectionChangedMsg{}))
+	assert.Equal(t, "before reload", model.content)
+
+	// Ctrl+R dispatches intents.Refresh directly to the revision graph. The
+	// preview may receive only its completion, with an unchanged selection.
+	runner.text = "after working-copy snapshot"
+	test.SimulateModel(model, model.Update(common.UpdateRevisionsSuccessMsg{}))
+	assert.Equal(t, 2, runner.calls)
+	assert.Equal(t, runner.text, model.content)
+}
+
 func TestPreviewErrorsAreVisibleAndRetried(t *testing.T) {
 	runner := &previewRunner{CommandRunner: test.NewTestCommandRunner(t), err: errors.New("Delta failed")}
 	ctx := test.NewTestContext(runner)

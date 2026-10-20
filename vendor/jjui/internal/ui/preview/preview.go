@@ -179,7 +179,10 @@ func (m *Model) Update(msg tea.Msg) tea.Cmd {
 		return nil
 	case common.SelectionChangedMsg:
 		return m.refreshPreviewForItem(m.context.Selection().Highlighted, false)
-	case common.RefreshMsg:
+	case common.RefreshMsg, common.UpdateRevisionsSuccessMsg:
+		// Keyboard refresh can reload the graph directly, without RefreshMsg.
+		// Always invalidate after it finishes, including when selection stays
+		// unchanged or an earlier preview overlapped the working-copy snapshot.
 		return m.refreshPreviewForItem(m.context.Selection().Highlighted, true)
 	case tea.WindowSizeMsg, ResizeMsg:
 		return m.refreshPreviewForItem(m.context.Selection().Highlighted, false)

@@ -123,7 +123,7 @@ builds and tests optimized binaries on native runners for:
 Pushes to `main` and manual workflow runs upload downloadable build artifacts.
 Changes confined to Nix packaging and the CI workflow skip rebuilding unchanged
 release binaries; source and installed-package CI checks still run.
-Version tags such as `v0.2.5` additionally publish all four archives to
+Version tags such as `v0.2.6` additionally publish all four archives to
 [GitHub Releases](https://github.com/Swoorup/fastjj/releases), after every target
 passes its optimized tests. The tag must match the version in `Cargo.toml`.
 Published assets are never overwritten: a repeated tag build must match the
@@ -137,9 +137,9 @@ in the same directory on your PATH and run `fjj embed`.
 
 ```sh
 # Linux
-sha256sum --check fjj-v0.2.5-x86_64-unknown-linux-gnu.tar.gz.sha256
+sha256sum --check fjj-v0.2.6-x86_64-unknown-linux-gnu.tar.gz.sha256
 # macOS (choose the matching architecture's archive)
-shasum -a 256 --check fjj-v0.2.5-aarch64-apple-darwin.tar.gz.sha256
+shasum -a 256 --check fjj-v0.2.6-aarch64-apple-darwin.tar.gz.sha256
 ```
 
 Linux binaries are built on Ubuntu 24.04 and need a compatible glibc installation.
